@@ -1,6 +1,6 @@
 // Lints a set of migration files: finds them, picks the runner profile and dialect of each, runs the rules,
 // and adds the checks that need the neighbouring files (down siblings, earlier schema, git history).
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import { UsageError } from './errors.mjs';
 import { HistoryError, historyFindings, isMigrationFile } from './history.mjs';
@@ -74,7 +74,19 @@ const flywayNoTransaction = (file) => {
   return existsSync(conf) && /^\s*executeInTransaction\s*=\s*false\s*$/im.test(readFileSync(conf, 'utf8'));
 };
 
-const relPath = (file) => relative(process.cwd(), file).replaceAll('\\', '/') || file;
+// git reports the repository's real path; the working directory may sit behind a symlink (macOS /var → /private/var).
+// Resolve the deepest existing ancestor, so deleted files still get a path relative to the working directory.
+const realPath = (path) => {
+  try {
+    return realpathSync(path);
+  } catch (e) {
+    if (e.code !== 'ENOENT') throw e;
+    const parent = dirname(path);
+    return parent === path ? path : join(realPath(parent), basename(path));
+  }
+};
+
+const relPath = (file) => relative(realPath(process.cwd()), realPath(resolve(file))).replaceAll('\\', '/') || file;
 
 // opts: { paths, stdin (string|null), dialect, runner, history, repo, base, schema: [] }
 export const lintTargets = (opts) => {
