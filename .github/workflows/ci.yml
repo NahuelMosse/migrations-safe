@@ -1,0 +1,50 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        node: ['22.13', '24']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - run: npm test
+      - name: Good fixtures lint clean
+        run: node skills/migrations-safe/scripts/migration-lint.mjs skills/migrations-safe/fixtures/good --strict
+      - name: Bad fixtures are rejected
+        shell: bash
+        run: |
+          for d in postgres postgres-locks mysql sqlite sqlite-rebuild; do
+            if node skills/migrations-safe/scripts/migration-lint.mjs "skills/migrations-safe/fixtures/bad/$d" > /dev/null; then
+              echo "bad/$d passed the linter"; exit 1
+            fi
+          done
+      - name: Rehearse the SQLite fixtures
+        shell: bash
+        run: |
+          S=skills/migrations-safe
+          node $S/scripts/rehearse-sqlite.mjs $S/fixtures/seed-sqlite.sql $S/fixtures/good/sqlite/0007_tasks_due.sql
+          if node $S/scripts/rehearse-sqlite.mjs $S/fixtures/seed-sqlite.sql $S/fixtures/bad/sqlite-rebuild/0009_tasks_drop_priority.sql > /dev/null; then
+            echo "the lossy rebuild was not caught"; exit 1
+          fi
+
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: npx --yes @anthropic-ai/claude-code plugin validate .

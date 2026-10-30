@@ -1,0 +1,5 @@
+{
+  "name": "migrations-safe",
+  "owner": { "name": "Nahuel Mosse" },
+  "plugins": [{ "name": "migrations-safe", "source": "./" }]
+}
