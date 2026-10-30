@@ -5,8 +5,12 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   test:
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -26,21 +30,25 @@ jobs:
       - name: Bad fixtures are rejected
         shell: bash
         run: |
+          expect_exit_1() {
+            code=0
+            "$@" > /dev/null || code=$?
+            if [ "$code" -ne 1 ]; then echo "expected exit 1, got $code: $*"; exit 1; fi
+          }
           for d in postgres postgres-locks mysql sqlite sqlite-rebuild; do
-            if node skills/migrations-safe/scripts/migration-lint.mjs "skills/migrations-safe/fixtures/bad/$d" > /dev/null; then
-              echo "bad/$d passed the linter"; exit 1
-            fi
+            expect_exit_1 node skills/migrations-safe/scripts/migration-lint.mjs "skills/migrations-safe/fixtures/bad/$d"
           done
       - name: Rehearse the SQLite fixtures
         shell: bash
         run: |
           S=skills/migrations-safe
           node $S/scripts/rehearse-sqlite.mjs $S/fixtures/seed-sqlite.sql $S/fixtures/good/sqlite/0007_tasks_due.sql
-          if node $S/scripts/rehearse-sqlite.mjs $S/fixtures/seed-sqlite.sql $S/fixtures/bad/sqlite-rebuild/0009_tasks_drop_priority.sql > /dev/null; then
-            echo "the lossy rebuild was not caught"; exit 1
-          fi
+          code=0
+          node $S/scripts/rehearse-sqlite.mjs $S/fixtures/seed-sqlite.sql $S/fixtures/bad/sqlite-rebuild/0009_tasks_drop_priority.sql > /dev/null || code=$?
+          if [ "$code" -ne 1 ]; then echo "the lossy rebuild must exit 1, got $code"; exit 1; fi
 
   validate:
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

@@ -1,4 +1,5 @@
 // Output formats and the exit code of the linter.
+import { UsageError } from './errors.mjs';
 import { ERROR, RULES, RULE_IDS } from './rules.mjs';
 
 export const SCHEMA_VERSION = 1;
@@ -7,9 +8,9 @@ const TOOL = { name: 'migrations-safe', informationUri: 'https://github.com/Nahu
 
 export const parseFailOn = (value) => {
   const tokens = value.split(',').map((t) => t.trim()).filter(Boolean);
-  if (!tokens.length) throw new Error('--fail-on needs warning, error or rule ids');
+  if (!tokens.length) throw new UsageError('--fail-on needs warning, error or rule ids');
   const bad = tokens.filter((t) => t !== 'warning' && t !== 'error' && !RULE_IDS.has(t));
-  if (bad.length) throw new Error(`--fail-on: unknown level or rule ${bad.join(', ')}`);
+  if (bad.length) throw new UsageError(`--fail-on: unknown level or rule ${bad.join(', ')}`);
   return { level: tokens.includes('warning') ? 'warning' : 'error', rules: new Set(tokens.filter((t) => RULE_IDS.has(t))) };
 };
 

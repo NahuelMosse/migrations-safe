@@ -22,8 +22,10 @@ that were added, dropped, retyped or emptied. It fails (exit 1) when:
 
 - a migration does not run (the rest are then skipped, not run on top of a half-applied state);
 - a table lost rows or was dropped with rows in it;
-- a column that held values was dropped (a column renamed with its values intact is reported as
-  `renamed to ...?`, not as a loss) or its non-NULL count went down;
+- a column that held values was dropped, or its non-NULL count went down. A dropped column is treated as a
+  rename (`renamed to ...?`, not a loss) only when a new column of the same table has the same non-NULL
+  count **and** the same value fingerprint (distinct count, total length, smallest and largest value). That
+  is evidence, not proof: columns that hold the same constant look alike, so read the `renamed` lines;
 - the migration created foreign-key orphans. Orphans already in the data do not count.
 
 `--allow-loss tasks.priority,audit` marks intended losses (a contract step after approval).

@@ -1,7 +1,9 @@
 ---
 name: migrations-safe
 description: Write and review database schema migrations so they do not lose data, break the code already running, or lock a busy table. Use when creating or reviewing a migration file (raw SQL, Prisma, Drizzle, Flyway, Liquibase, goose, dbmate, golang-migrate, Atlas, Alembic, Django, Knex, Rails), when dropping, renaming or retyping columns or tables, adding NOT NULL or an index to a populated table, when a migration failed or locked production, when an applied migration was edited, or when two branches' migrations collide. Not for data modelling from scratch, SELECT or index tuning, ORM usage, moving data between database products, or upgrading the database server.
-allowed-tools: Bash(node ${CLAUDE_SKILL_DIR}/scripts/*)
+allowed-tools:
+  - Bash(node ${CLAUDE_SKILL_DIR}/scripts/*)
+  - Bash(node "${CLAUDE_SKILL_DIR}/scripts/*")
 ---
 
 # Safe migrations
@@ -23,11 +25,12 @@ node "${CLAUDE_SKILL_DIR}/scripts/migration-lint.mjs" prisma/migrations --fail-o
 python manage.py sqlmigrate shop 0042 | node "${CLAUDE_SKILL_DIR}/scripts/migration-lint.mjs" - --runner django
 ```
 
-PowerShell: `node "$env:CLAUDE_SKILL_DIR/scripts/migration-lint.mjs" <path>`.
+The same commands work in PowerShell: `${CLAUDE_SKILL_DIR}` is replaced with the skill's path before the
+shell sees the command, so it is not an environment variable.
 
 - Needs Node 22.13+. No database needed; reads `.sql` files or SQL on stdin (`-`).
 - The runner (Prisma, Drizzle, Flyway, Liquibase, goose, dbmate, golang-migrate, Atlas, Alembic, Django,
-  Knex, or plain SQL) and the dialect (PostgreSQL, SQLite, MySQL) are detected from the project; override
+  Knex, Rails, or plain SQL) and the dialect (PostgreSQL, SQLite, MySQL) are detected from the project; override
   with `--runner` and `--dialect`. Details per runner, and how to feed Alembic, Django, Knex and Rails:
   [references/runners.md](references/runners.md). Read it when the project uses any of them.
 - Exit 0 nothing at the failure level, 1 findings, **2 could not run, which is never a pass** (0 files

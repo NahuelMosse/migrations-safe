@@ -48,7 +48,8 @@ const VOLATILE_FN = /\b(?:random|setseed|gen_random_uuid|uuid_generate_v\w+|cloc
 const DEFAULT_END = /\b(?:not null|null|check|references|unique|primary key|constraint|collate|generated|on update)\b/i;
 const NON_COLUMN_ADD = /^(?:constraint|index|key|unique|primary|foreign|check|fulltext|spatial|partition)\b/i;
 const NOT_COLUMN_DROP = /^drop (?:constraint|index|key|default|not null|primary|foreign|check|partition|expression|identity)\b/i;
-const TX_START = /^(?:begin|start transaction)\b/i;
+const NON_DDL = /^(?:begin|start transaction|commit|set\b|pragma\b|select\b)/i;
+const TX_START =/^(?:begin|start transaction)\b/i;
 const LOCK_TIMEOUT = /^(?:set\s+(?:session\s+|local\s+)?lock_timeout\b|select\s+set_config\s*\(\s*'lock_timeout')/i;
 const TABLE_ALL = String.raw`(?:only )?(${ident})`;
 
@@ -71,6 +72,9 @@ const sourceTables = (texts) => {
   return { copiedFrom, renamedTo };
 };
 
+// Text taken from a file and shown in a message is cut short: say what is wrong, not what the file holds.
+const clip = (text) => (text.length > 40 ? `${text.slice(0, 40)}...` : text);
+
 const parseDirectives = (directives, add) => {
   const allowFile = new Set();
   const allowAt = [];
@@ -78,17 +82,17 @@ const parseDirectives = (directives, add) => {
   const bad = (d, msg) => add(null, 'invalid-directive', msg, { line: d.line });
   for (const d of directives) {
     if (d.kind === 'misplaced') { bad(d, 'migration-lint directive must be a comment of its own that starts with `migration-lint:`; this one is ignored'); continue; }
-    if (d.kind === 'dialect') { if (!DIALECTS.includes(d.arg.split(/\s/)[0]?.toLowerCase())) bad(d, `unknown dialect "${d.arg}"`); continue; }
+    if (d.kind === 'dialect') { if (!DIALECTS.includes(d.arg.split(/\s/)[0]?.toLowerCase())) bad(d, `unknown dialect "${clip(d.arg)}"`); continue; }
     if (d.kind === 'irreversible') {
       if (d.reason.length < 3) bad(d, 'irreversible needs a recovery plan: `-- migration-lint: irreversible -- <plan>`');
       else irreversible = d;
       continue;
     }
-    if (d.kind !== 'allow' && d.kind !== 'allow-file') { bad(d, `unknown directive "${d.kind}"`); continue; }
+    if (d.kind !== 'allow' && d.kind !== 'allow-file') { bad(d, `unknown directive "${clip(d.kind)}"`); continue; }
     const rules = d.arg.split(/[\s,]+/).filter(Boolean);
     const unknown = rules.filter((r) => !RULE_IDS.has(r));
     if (!rules.length) { bad(d, `${d.kind} names no rule`); continue; }
-    if (unknown.length) { bad(d, `${d.kind} names unknown rule(s) ${unknown.join(', ')}; nothing is silenced`); continue; }
+    if (unknown.length) { bad(d, `${d.kind} names unknown rule(s) ${clip(unknown.join(', '))}; nothing is silenced`); continue; }
     if (d.reason.length < 3) { bad(d, `${d.kind} ${rules.join(', ')} has no reason: \`-- migration-lint: ${d.kind} ${rules[0]} -- <who, when, why>\`; nothing is silenced`); continue; }
     if (d.kind === 'allow-file') rules.forEach((r) => allowFile.add(r));
     else allowAt.push({ statement: d.statement, rules });
@@ -110,8 +114,14 @@ export const lintSql = (sql, ctx = {}) => {
   const created = new Set(ctx.createdBefore ?? []);
   const createdHere = new Set();
   const tables = cloneSchema(ctx.schema ?? new Map());
-  const wrapped = wrapsFile(profile, { noTransaction: markers.noTransaction, statements: statements.length });
-  const explicitWrap = profile.wraps === true && !markers.noTransaction;
+  // Flyway runs a script outside a transaction when every statement in it cannot run inside one.
+  const flywayAutoCommit = profile.id === 'flyway' && texts.length > 0
+    && texts.filter((t) => !NON_DDL.test(t)).every((t) => /\bconcurrently\b/i.test(t));
+  const noTransaction = markers.noTransaction || ctx.noTransaction === true || flywayAutoCommit;
+  // SQL a runner generated (stdin) shows its own transaction: BEGIN/COMMIT present means wrapped.
+  const generated = ctx.generated === true && profile.generatesSql;
+  const wrapped = !generated && wrapsFile(profile, { noTransaction, statements: statements.length });
+  const explicitWrap = !generated && profile.wraps === true && !noTransaction;
   const explicitTx = texts.some((t) => TX_START.test(t));
 
   let directiveState;
@@ -197,6 +207,7 @@ export const lintSql = (sql, ctx = {}) => {
   let firstLock = -1;
   let lockTimeoutAt = -1;
   let reportedTx = false;
+  let reportedPragma = false;
   texts.forEach((t, k) => {
     const b = bare[k];
     const create = t.match(new RegExp(String.raw`^create (?:temp(?:orary)? |unlogged )?table (?:if not exists )?(${ident})`, 'i'));
@@ -248,8 +259,10 @@ export const lintSql = (sql, ctx = {}) => {
       reportedTx = true;
       add(k, 'transaction-conflict', `${profile.label} already runs the file in a transaction: ${dialect === 'sqlite' ? 'a nested BEGIN fails with "cannot start a transaction within a transaction"' : 'BEGIN/COMMIT inside it end the transaction early or warn'} — remove them`, { level: dialect === 'sqlite' ? ERROR : WARN });
     }
-    if (explicitWrap && /^pragma\s+foreign_keys\b/i.test(t))
-      add(k, 'transaction-conflict', `PRAGMA foreign_keys is a no-op inside the transaction ${profile.label} wraps around the file, so DROP TABLE still cascades to child rows: use PRAGMA defer_foreign_keys = ON`, { level: copiedFrom.size ? ERROR : WARN });
+    if (wrapped && !reportedPragma && /^pragma\s+foreign_keys\b/i.test(t)) {
+      reportedPragma = true;
+      add(k, 'transaction-conflict', `PRAGMA foreign_keys is a no-op inside the transaction ${profile.label} wraps around the file, so DROP TABLE still runs ON DELETE CASCADE / SET NULL on child rows. Run the rebuild in the runner's no-transaction mode, where foreign_keys=OFF takes effect (PRAGMA defer_foreign_keys only helps plain NO ACTION foreign keys), and rehearse it with real child rows`, { level: copiedFrom.size ? ERROR : WARN });
+    }
     if (LOCK_TIMEOUT.test(t) && lockTimeoutAt === -1) lockTimeoutAt = k;
     applySchema(tables, t);
   });
@@ -262,7 +275,7 @@ export const lintSql = (sql, ctx = {}) => {
   const ddl = texts.filter((t) => !/^(begin|start transaction|commit|set\b|pragma\b|select\b)/i.test(t));
   const concurrent = texts.some((t) => /\bconcurrently\b/i.test(t));
   if (dialect !== 'mysql' && ddl.length > 1 && !explicitTx && !concurrent && !wrapped)
-    add(0, 'not-atomic', `${ddl.length} statements outside a transaction: a failure halfway leaves the schema between versions — BEGIN/COMMIT, or allow-file it when the runner wraps each file`);
+    add(0, 'not-atomic', `${ddl.length} statements outside a transaction: a failure halfway leaves the schema between versions — BEGIN/COMMIT, or pass --runner (or add the runner's config file) when the runner wraps each file`);
 
   findings.sort((a, b) => a.line - b.line);
   return {

@@ -52,9 +52,10 @@ Options: `--runner`, `--dialect`, `--fail-on warning|error|<rule>,...`, `--forma
 | golang-migrate | `x.up.sql` / `x.down.sql` | yes | implicit, multi-statement | strict |
 | Atlas | `atlas.hcl`, `atlas.sum` | no | yes | strict |
 | Alembic, Django, Knex | `alembic.ini`, `manage.py`, `knexfile.*` | yes | yes | graph / graph / strict |
+| Rails | `config/application.rb`, `db/migrate/*.rb` | yes | yes | lenient |
 | plain SQL | nothing | yes | no | strict |
 
-Alembic, Django and Knex generate SQL at run time: pipe it in with `-`. Dialects: PostgreSQL (all rules),
+Alembic, Django, Knex and Rails generate SQL at run time: pipe it in with `-`. Dialects: PostgreSQL (all rules),
 MySQL (`ALGORITHM`, type changes, renames and the generic rules), SQLite (generic rules, table rebuild checks,
 rehearsal). The linter is regex-based; for PostgreSQL also run `squawk`.
 
@@ -80,8 +81,12 @@ jobs:
           node "$RUNNER_TEMP/ms/skills/migrations-safe/scripts/migration-lint.mjs" --history --base origin/${{ github.base_ref }} --format github
 ```
 
-With `fetch-depth: 1` the history checks exit 2 and say so. On a push to main, `--base HEAD~1` checks what the
-push added.
+With `fetch-depth: 1` the history checks exit 2 and say so. For a push to main, compare with the commit before
+the push (`fetch-depth: 0` keeps it available):
+
+```yaml
+      - run: node "$RUNNER_TEMP/ms/skills/migrations-safe/scripts/migration-lint.mjs" --history --base ${{ github.event.before }} --format github
+```
 
 ## Development
 
@@ -89,6 +94,9 @@ push added.
 npm test
 node skills/migrations-safe/scripts/migration-lint.mjs skills/migrations-safe/fixtures/good --strict
 ```
+
+Trigger evals live in `evals/` (run them with `claude plugin eval . --scaffold --allow-tools Bash`: four cases
+seed their workspace with a `fixture.sh`, and every case lists `Skill` in `allowed_tools` so the skill can fire).
 
 Layout: `skills/migrations-safe/` (SKILL.md, `scripts/`, `scripts/lib/`, `references/`, `fixtures/`), `evals/`,
 `test/`. License MIT.

@@ -5,10 +5,11 @@
 // ordering against the tip of the base ref (what the branch will land on), so a branch that is not rebased
 // does not look like it deleted what the base added since.
 import { spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
+import { basename, join } from 'node:path';
+import { parse } from './parse.mjs';
 import { ERROR, WARN } from './rules.mjs';
-import { detectRunner, profileOf } from './runners.mjs';
+import { detectRunner, profileOf, runnerFromMarkers, runnerFromName } from './runners.mjs';
 
 const MIGRATION_DIR = /(^|\/)(migrations?|db\/migrate|alembic\/versions|db\/changelogs?|db\/changesets?|drizzle)\//i;
 const FLYWAY_NAME = /^(?:V|U)\d+(?:[._]\d+)*__.+\.sql$|^R__.+\.sql$/i;
@@ -60,14 +61,49 @@ const unitOf = (f) => {
 
 export const historyFindings = (repo, ref, { runner = null } = {}) => {
   const base = resolveBase(repo, ref);
+  const readAny = (file) => {
+    if (existsSync(join(repo, file))) return readFileSync(join(repo, file), 'utf8');
+    const shown = git(repo, ['show', `${base.mergeBase}:${file}`]);
+    return shown.status === 0 ? shown.stdout : '';
+  };
+  const tree = (sha) => git(repo, ['ls-tree', '-r', '--name-only', '-z', sha]).stdout.split('\0').filter((f) => f && isMigrationFile(f));
+  const inMergeBase = new Set(tree(base.mergeBase));
+  const settledFiles = new Set([...inMergeBase, ...tree(base.tip)]);
+  const present = git(repo, ['ls-files', '-co', '--exclude-standard', '-z']).stdout.split('\0')
+    .filter((f) => f && isMigrationFile(f) && existsSync(join(repo, f)));
+
+  const filesByGroup = new Map();
+  for (const f of new Set([...settledFiles, ...present])) {
+    const g = unitOf(f).group;
+    filesByGroup.set(g, [...(filesByGroup.get(g) ?? []), f]);
+  }
+  // The runner of a folder: its config files, then the names and contents of the migrations in it.
   const profiles = new Map();
   const profileOfGroup = (group) => {
     if (runner) return profileOf(runner);
-    if (!profiles.has(group)) profiles.set(group, profileOf(detectRunner(join(repo, group || '.'), { fileName: '' }).id));
+    if (profiles.has(group)) return profiles.get(group);
+    const files = filesByGroup.get(group) ?? [];
+    let found = detectRunner(join(repo, group || '.'));
+    if (found.id === 'raw') found = files.map((f) => runnerFromName(basename(f))).find(Boolean) ?? found;
+    if (found.id === 'raw') {
+      for (const f of files.filter((x) => /\.sql$/i.test(x) && existsSync(join(repo, x))).slice(0, 5)) {
+        const hit = runnerFromMarkers(parse(readAny(f)).markers);
+        if (hit) { found = hit; break; }
+      }
+    }
+    if (found.id === 'raw' && files.some((f) => /(^|\/)db\/migrate\/[^/]+\.rb$/.test(f))) found = { id: 'rails' };
+    if (found.id === 'raw' && files.some((f) => /\.(xml|ya?ml)$/i.test(f) && /databaseChangeLog/.test(readAny(f)))) found = { id: 'liquibase' };
+    profiles.set(group, profileOf(found.id));
     return profiles.get(group);
   };
   const profileOfFile = (file) => profileOfGroup(unitOf(file).group);
-  const mutable = (file) => profileOfFile(file).manifests.some((re) => re.test(file));
+  // Files that change with every migration and are not migrations: manifests, repeatable scripts, master changelogs.
+  const mutable = (file) => {
+    const profile = profileOfFile(file);
+    if (profile.manifests.some((re) => re.test(file)) || /(^|\/)R__[^/]*$/.test(file)) return true;
+    return profile.id === 'liquibase' && /\.(xml|ya?ml|json)$/i.test(file)
+      && (/(^|\/)[^/]*master[^/]*\.(xml|ya?ml|json)$/i.test(file) || /<include\b|^\s*-?\s*include\s*:|"include"\s*:/m.test(readAny(file)));
+  };
   const findings = [];
 
   const changed = git(repo, ['diff', '--name-status', '-M', '--diff-filter=MDRT', base.mergeBase]).stdout.split('\n').filter(Boolean);
@@ -78,13 +114,9 @@ export const historyFindings = (repo, ref, { runner = null } = {}) => {
     findings.push({ level: ERROR, rule: 'applied-migration-changed', file, line: 1, message: `the branch ${verb} ${file}${to ? ` (to ${to})` : ''}, which exists in ${base.label} (merge-base ${base.mergeBase.slice(0, 8)}) and is assumed applied everywhere: restore it and write the correction as a new migration` });
   }
 
-  const tree = (sha) => git(repo, ['ls-tree', '-r', '--name-only', '-z', sha]).stdout.split('\0').filter((f) => f && isMigrationFile(f));
-  const inMergeBase = new Set(tree(base.mergeBase));
-  const settledFiles = new Set([...inMergeBase, ...tree(base.tip)]);
-  const present = git(repo, ['ls-files', '-co', '--exclude-standard', '-z']).stdout.split('\0')
-    .filter((f) => f && isMigrationFile(f) && existsSync(join(repo, f)) && !mutable(f));
-  const fresh = present.filter((f) => !inMergeBase.has(f));
+  const fresh = present.filter((f) => !inMergeBase.has(f) && !mutable(f));
 
+  const freshSet = new Set(fresh);
   const groups = new Map();
   const put = (f, isFresh) => {
     const u = unitOf(f);
@@ -93,7 +125,7 @@ export const historyFindings = (repo, ref, { runner = null } = {}) => {
     if (!g.has(u.name)) g.set(u.name, { ...u, file: f, fresh: false, seq: seqOf(u.name) });
     if (isFresh) g.get(u.name).fresh = true;
   };
-  [...settledFiles].filter((f) => !mutable(f) && !fresh.includes(f)).forEach((f) => put(f, false));
+  [...settledFiles].filter((f) => !mutable(f) && !freshSet.has(f)).forEach((f) => put(f, false));
   fresh.forEach((f) => put(f, true));
 
   for (const [group, units] of groups) {

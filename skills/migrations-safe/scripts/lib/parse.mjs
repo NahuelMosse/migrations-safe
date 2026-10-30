@@ -43,7 +43,7 @@ export const parse = (sql, { dialect = 'postgres' } = {}) => {
   const statements = [];
   const directives = [];
   const comments = [];
-  const markers = { goose: false, dbmate: false, sqlMigrate: false, noTransaction: false };
+  const markers = { goose: false, dbmate: false, sqlMigrate: false, noTransaction: false, rollback: false, liquibase: false };
   let hasDownSection = false;
   let downSql = '';
   let upEnd = sql.length;
@@ -86,6 +86,8 @@ export const parse = (sql, { dialect = 'postgres' } = {}) => {
       }
       if (/^\+goose\s+no\s+transaction\b/i.test(body) || /^\+migrate\s+up\b.*\bnotransaction\b/i.test(body)
         || /^migrate:up\b.*\btransaction:false\b/i.test(body) || /^atlas:txmode\s+none\b/i.test(body)) markers.noTransaction = true;
+      if (/^rollback\b/i.test(body)) markers.rollback = true;
+      if (/^liquibase formatted sql\b/i.test(body)) markers.liquibase = true;
       if (/^\+goose\b/i.test(body)) markers.goose = true;
       if (/^migrate:(up|down)\b/i.test(body)) markers.dbmate = true;
       if (/^\+migrate\b/i.test(body)) markers.sqlMigrate = true;
@@ -181,8 +183,12 @@ export const splitTopLevel = (text, sep = ',') => {
   for (let i = 0; i < text.length; i++) {
     const ch = text[i];
     if (ch === "'" || ch === '"' || ch === '`') {
+      const escapes = ch === "'" && /[eE]/.test(text[i - 1] ?? '') && !IS_WORD.test(text[i - 2] ?? ' ');
       let j = i + 1;
-      while (j < text.length && !(text[j] === ch && text[j + 1] !== ch)) j += text[j] === ch ? 2 : 1;
+      while (j < text.length && !(text[j] === ch && text[j + 1] !== ch)) {
+        if (escapes && text[j] === '\\') j += 2;
+        else j += text[j] === ch ? 2 : 1;
+      }
       i = j;
     } else if (ch === '(') depth++;
     else if (ch === ')') depth--;

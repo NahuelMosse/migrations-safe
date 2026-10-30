@@ -26,7 +26,7 @@ export const rehearseCli = (args, opts) => node(REHEARSE, args, opts);
 // A scratch directory under the OS temp dir that removes itself when the test ends.
 export const scratch = (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'msafe-test-'));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  t.after(() => rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }));
   return dir;
 };
 

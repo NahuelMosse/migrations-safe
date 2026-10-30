@@ -4,5 +4,6 @@ tags: [trigger]
 runs: 3
 max_turns: 10
 timeout_seconds: 300
+allowed_tools: [Read, Glob, Grep, Skill]
 ---
 CI says checksum mismatch for V12 after I fixed a typo in it. How do I make Flyway happy?

@@ -68,6 +68,11 @@ export const PROFILES = {
     config: ['knexfile.js', 'knexfile.ts', 'knexfile.cjs', 'knexfile.mjs'],
     hint: 'run knex migrate:latest on a scratch database with DEBUG=knex:query and pipe the statements',
   },
+  rails: {
+    label: 'Rails', downs: true, wraps: true, order: 'lenient', foreignKeys: 'off', generatesSql: true,
+    layout: 'db/migrate/<timestamp>_name.rb', manifests: [/(^|\/)db\/(schema\.rb|structure\.sql)$/], config: ['config/application.rb'],
+    hint: 'run rails db:migrate on a scratch database with the SQL logged and pipe the statements',
+  },
   raw: {
     label: 'plain SQL files', downs: true, wraps: false, order: 'strict', foreignKeys: 'off', generatesSql: false,
     layout: 'any .sql files, applied in name order by something else', manifests: [], config: [],
@@ -79,7 +84,23 @@ export const DIALECTS = ['postgres', 'sqlite', 'mysql'];
 
 export const profileOf = (id) => ({ id, ...PROFILES[id] });
 
-const CONFIG_PRIORITY = ['prisma', 'drizzle', 'atlas', 'liquibase', 'flyway', 'alembic', 'knex', 'django'];
+const CONFIG_PRIORITY = ['prisma', 'drizzle', 'atlas', 'liquibase', 'flyway', 'alembic', 'knex', 'django', 'rails'];
+
+// The runner a file's own markers point to, or null.
+export const runnerFromMarkers = (markers) => {
+  if (markers?.liquibase) return { id: 'liquibase', evidence: '--liquibase formatted sql header' };
+  if (markers?.goose) return { id: 'goose', evidence: '-- +goose marker' };
+  if (markers?.dbmate) return { id: 'dbmate', evidence: '-- migrate: marker' };
+  if (markers?.sqlMigrate) return { id: 'goose', evidence: '-- +migrate marker (sql-migrate uses goose-style sections)' };
+  return null;
+};
+
+// The runner a file name points to, or null.
+export const runnerFromName = (fileName) => {
+  if (/^(V\d+(?:[._]\d+)*|R)__.+\.sql$/i.test(fileName)) return { id: 'flyway', evidence: `file name ${fileName}` };
+  if (/\.(up|down)\.sql$/i.test(fileName)) return { id: 'golang-migrate', evidence: `file name ${fileName}` };
+  return null;
+};
 
 const startDir = (path) => { try { return statSync(path).isDirectory() ? path : dirname(path); } catch { return dirname(path); } };
 
@@ -105,12 +126,7 @@ export const detectRunner = (path, { markers = null, fileName = '' } = {}) => {
       if (hit) return { id, evidence: `${hit} in ${dir}` };
     }
   }
-  if (markers?.goose) return { id: 'goose', evidence: '-- +goose marker' };
-  if (markers?.dbmate) return { id: 'dbmate', evidence: '-- migrate: marker' };
-  if (markers?.sqlMigrate) return { id: 'goose', evidence: '-- +migrate marker (sql-migrate uses goose-style sections)' };
-  if (/^(V\d+(?:[._]\d+)*|R)__.+\.sql$/i.test(fileName)) return { id: 'flyway', evidence: `file name ${fileName}` };
-  if (/\.(up|down)\.sql$/i.test(fileName)) return { id: 'golang-migrate', evidence: `file name ${fileName}` };
-  return { id: 'raw', evidence: 'no runner config found' };
+  return runnerFromMarkers(markers) ?? runnerFromName(fileName) ?? { id: 'raw', evidence: 'no runner config found' };
 };
 
 export const wrapsFile = (profile, { noTransaction = false, statements = 0 } = {}) =>

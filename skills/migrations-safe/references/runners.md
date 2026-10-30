@@ -22,6 +22,7 @@ mean SQLite); otherwise PostgreSQL.
 | `alembic` | `alembic.ini` | `alembic upgrade A:B --sql` piped to `-` | yes | yes | graph |
 | `django` | `manage.py` | `python manage.py sqlmigrate <app> <n>` piped to `-` | yes | yes (`atomic`) | graph |
 | `knex` | `knexfile.*` | statements logged while it runs on a scratch database, piped to `-` | yes | yes | strict |
+| `rails` | `config/application.rb`, `db/migrate/*.rb` | SQL logged while `rails db:migrate` runs on a scratch database, piped to `-` | yes | yes | lenient |
 | `raw` | nothing found | any `.sql` | yes | no | strict |
 
 What a profile changes in the findings:
@@ -44,6 +45,10 @@ python manage.py sqlmigrate shop 0042 | node "${CLAUDE_SKILL_DIR}/scripts/migrat
 alembic upgrade head --sql | node "${CLAUDE_SKILL_DIR}/scripts/migration-lint.mjs" - --runner alembic
 ```
 
+- On stdin the generated SQL shows what the runner does: a `BEGIN`/`COMMIT` in it means it is wrapped, its
+  absence means it is not. No `missing-down` is reported for stdin, and empty stdin is exit 2.
+- Flyway runs a script outside a transaction when every statement in it is `CONCURRENTLY`, or when a
+  `V2__x.sql.conf` next to it has `executeInTransaction=false`; the linter reads both.
 - **Rails**: `strong_migrations` sees the DSL and is the primary check. To lint the SQL, run
   `rails db:migrate` on a scratch database with the statements logged (`ActiveRecord::Base.logger =
   Logger.new($stdout)` in an initializer for the run) and pipe the `CREATE`/`ALTER` lines in. `rails

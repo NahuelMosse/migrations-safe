@@ -110,3 +110,12 @@ test('irreversible needs a recovery plan', () => {
   assert.ok(ids('-- migration-lint: irreversible\nSELECT 1;').includes('invalid-directive'));
   assert.ok(!ids('-- migration-lint: irreversible -- restore from the nightly snapshot\nSELECT 1;').includes('invalid-directive'));
 });
+
+test('messages about a bad directive do not echo more of the file than needed', () => {
+  const long = 'x'.repeat(500);
+  const msg = findings(`-- migration-lint: allow ${long} -- because\nSELECT 1;`).find((f) => f.rule === 'invalid-directive').message;
+  assert.ok(msg.length < 200, `${msg.length} chars`);
+  assert.ok(!msg.includes(long));
+  const kind = findings(`-- migration-lint: ${long} -- because\nSELECT 1;`).find((f) => f.rule === 'invalid-directive').message;
+  assert.ok(kind.length < 200);
+});

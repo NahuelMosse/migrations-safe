@@ -26,12 +26,16 @@ const snapshot = (db) => {
   const names = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all();
   for (const { name } of names) {
     const cols = db.prepare(`PRAGMA table_info(${q(name)})`).all();
-    const counts = cols.length
-      ? db.prepare(`SELECT count(*) AS n${cols.map((c, i) => `, count(${q(c.name)}) AS c${i}`).join('')} FROM ${q(name)}`).get()
-      : { n: 0 };
+    // A column's fingerprint (distinct values, total text length, smallest and largest value) tells a renamed
+    // column, whose values survive, from a dropped one and a new one that merely has as many non-NULL values.
+    const per = (c, i) => `, count(${q(c.name)}) AS c${i}, count(DISTINCT ${q(c.name)}) AS d${i}, total(length(quote(${q(c.name)}))) AS l${i}, min(quote(${q(c.name)})) AS lo${i}, max(quote(${q(c.name)})) AS hi${i}`;
+    const counts = cols.length ? db.prepare(`SELECT count(*) AS n${cols.map(per).join('')} FROM ${q(name)}`).get() : { n: 0 };
     tables.set(name, {
       rows: Number(counts.n),
-      columns: new Map(cols.map((c, i) => [c.name, { type: c.type, notnull: c.notnull === 1, nonNull: Number(counts[`c${i}`]) }])),
+      columns: new Map(cols.map((c, i) => [c.name, {
+        type: c.type, notnull: c.notnull === 1, nonNull: Number(counts[`c${i}`]),
+        fingerprint: [counts[`d${i}`], counts[`l${i}`], counts[`lo${i}`], counts[`hi${i}`]].join('|'),
+      }])),
     });
   }
   return tables;
@@ -56,7 +60,7 @@ const diff = (before, after, kind, allowLoss) => {
     const added = [...a.columns].filter(([c]) => !b.columns.has(c));
     const paired = new Map();
     for (const [c, info] of removed) {
-      const twin = added.find(([n, x]) => x.nonNull === info.nonNull && info.nonNull > 0 && ![...paired.values()].includes(n));
+      const twin = added.find(([n, x]) => x.nonNull === info.nonNull && x.fingerprint === info.fingerprint && info.nonNull > 0 && ![...paired.values()].includes(n));
       if (twin) paired.set(c, twin[0]);
     }
     for (const [c, info] of removed) {

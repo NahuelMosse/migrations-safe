@@ -18,7 +18,11 @@ test('SKILL.md: frontmatter, size, variables and links', () => {
   const description = front.match(/^description: (.*)$/m)[1];
   assert.ok(description.length <= 700, `description is ${description.length} chars`);
   assert.match(front, /^name: migrations-safe$/m);
-  assert.match(front, /^allowed-tools: Bash\(node \$\{CLAUDE_SKILL_DIR\}\/scripts\/\*\)$/m);
+  // the commands in the body use the quoted form; the allowlist must match both spellings
+  assert.match(front, /^allowed-tools:\n {2}- Bash\(node \$\{CLAUDE_SKILL_DIR\}\/scripts\/\*\)\n {2}- Bash\(node "\$\{CLAUDE_SKILL_DIR\}\/scripts\/\*"\)$/m);
+  for (const [, cmd] of text.matchAll(/(?:^|\| )(node "\$\{CLAUDE_SKILL_DIR\}\/scripts\/[^"]+")/gm)) assert.ok(cmd.startsWith('node "${CLAUDE_SKILL_DIR}/scripts/'));
+  assert.ok(!text.includes('$env:CLAUDE_SKILL_DIR'));
+  assert.ok(!/node \$\{CLAUDE_SKILL_DIR\}/.test(text.slice(text.indexOf('\n---\n', 4))), 'commands in the body are quoted');
   assert.ok(text.split('\n').length < 500);
   assert.ok(!text.includes('<skill-dir>'));
   assert.match(text, /\$\{CLAUDE_SKILL_DIR\}\/scripts\/migration-lint\.mjs/);
@@ -42,7 +46,10 @@ test('packaging files agree with each other', () => {
   assert.equal(plugin.version, pkg.version);
   assert.equal(plugin.license, 'MIT');
   assert.equal(market.name, 'migrations-safe');
-  assert.deepEqual(market.plugins, [{ name: 'migrations-safe', source: './' }]);
+  assert.equal(market.plugins.length, 1);
+  assert.equal(market.plugins[0].name, 'migrations-safe');
+  assert.equal(market.plugins[0].source, './');
+  assert.ok(market.description && market.plugins[0].description);
   assert.match(read(join(ROOT, 'CHANGELOG.md')), new RegExp(`^## ${pkg.version.replaceAll('.', '\\.')}\\b`, 'm'));
   assert.match(read(join(ROOT, 'LICENSE')), /^MIT License[\s\S]*Copyright \(c\) 2026 Nahuel Mosse/);
   assert.ok(!existsSync(join(ROOT, 'evals.md')));
@@ -52,10 +59,21 @@ test('every eval case has a prompt and a grader', () => {
   const dir = join(ROOT, 'evals');
   const cases = readdirSync(dir, { withFileTypes: true }).filter((d) => d.isDirectory());
   assert.equal(cases.length, 10);
+  // cases that need files or a repository seed their workspace with a scaffold
+  for (const name of ['review-prisma-migration', 'sqlite-rehearsal', 'migration-number-collision', 'flyway-checksum-mismatch'])
+    assert.ok(existsSync(join(dir, name, 'case.yaml')), `${name} needs a scaffold`);
   for (const c of cases) {
     assert.ok(existsSync(join(dir, c.name, 'prompt.md')), `${c.name}/prompt.md`);
     const graders = readdirSync(join(dir, c.name, 'graders')).filter((f) => f.endsWith('.md'));
     assert.ok(graders.length >= 1, c.name);
+    assert.match(read(join(dir, c.name, 'prompt.md')), /^allowed_tools: \[[^\]]*\bSkill\b[^\]]*\]$/m, `${c.name} must allow the Skill tool`);
+    const caseFile =join(dir, c.name, 'case.yaml');
+    if (existsSync(caseFile)) {
+      const yaml = read(caseFile);
+      assert.match(yaml, /^schema_version: "1\.1"$/m);
+      assert.match(yaml, new RegExp(`^name: ${c.name}$`, 'm'));
+      assert.ok(existsSync(join(dir, c.name, yaml.match(/scaffold_script: (\S+)/)[1])), `${c.name} scaffold`);
+    }
     for (const g of graders) assert.match(read(join(dir, c.name, 'graders', g)), /^---\ntype: (tool_used|llm)\n/);
   }
 });

@@ -1,0 +1,5 @@
+schema_version: "1.1"
+name: sqlite-rehearsal
+tags: [trigger]
+context:
+  scaffold_script: fixture.sh

@@ -15,7 +15,7 @@ COMMIT;
 PRAGMA foreign_keys=ON;
 `;
 
-test('a rebuild that drops a populated column loses data and fails the rehearsal (C2)', (t) => {
+test('a rebuild that drops a populated column loses data and fails the rehearsal', (t) => {
   const dir = scratch(t);
   const file = put(dir, '0007_rebuild.sql', REBUILD_DROPPING_PRIORITY);
   const r = rehearseCli([SEED, file]);
@@ -56,7 +56,7 @@ INSERT INTO parent (id) VALUES (1), (2);
 INSERT INTO child (id, parent_id) VALUES (1, 1), (2, 2), (3, 2);
 `;
 
-test('orphans that already exist do not fail the rehearsal; new ones do (M6)', (t) => {
+test('orphans that already exist do not fail the rehearsal; new ones do', (t) => {
   const dir = scratch(t);
   const seed = put(dir, 'seed.sql', `${PARENT_CHILD}INSERT INTO child (id, parent_id) VALUES (9, 99);\n`);
   const harmless = put(dir, '0001_harmless.sql', 'ALTER TABLE parent ADD COLUMN note TEXT;\n');
@@ -67,7 +67,7 @@ test('orphans that already exist do not fail the rehearsal; new ones do (M6)', (
   assert.match(r.out, /new orphan foreign key row\(s\): 1/);
 });
 
-test('foreign_keys follows the runner: a wrapped file cannot switch it off, so DROP TABLE cascades (H5)', (t) => {
+test('foreign_keys follows the runner: a wrapped file cannot switch it off, so DROP TABLE cascades', (t) => {
   const dir = scratch(t);
   const seed = put(dir, 'seed.sql', PARENT_CHILD);
   const rebuild = `PRAGMA foreign_keys=OFF;
@@ -87,7 +87,7 @@ PRAGMA foreign_keys=ON;
   assert.equal(raw.code, 0, raw.out);
 });
 
-test('--down with no files runs the down sections of single-file migrations (M5)', (t) => {
+test('--down with no files runs the down sections of single-file migrations', (t) => {
   const dir = scratch(t);
   const file = put(dir, '0001_note.sql', '-- migrate:up\nALTER TABLE tasks ADD COLUMN note TEXT;\n\n-- migrate:down\nALTER TABLE tasks DROP COLUMN note;\n');
   const r = rehearseCli([SEED, file, '--down']);
@@ -121,7 +121,7 @@ test('after a failed up the rest is skipped instead of cascading failures', (t) 
   assert.ok(!/ran\s+up/.test(r.out));
 });
 
-test('a database in WAL mode is copied with the data still in its -wal file (backup API, not a file copy)', (t) => {
+test('a database in WAL mode is copied with the data still in its -wal file (VACUUM INTO, not a file copy)', (t) => {
   const dir = scratch(t);
   const path = join(dir, 'app.db');
   const live = new DatabaseSync(path);
@@ -155,7 +155,7 @@ test('argument and file errors are exit 2', (t) => {
   assert.equal(rehearseCli([SEED]).code, 2);
   assert.equal(rehearseCli([SEED, join(dir, 'missing.sql')]).code, 2);
   assert.equal(rehearseCli([join(dir, 'missing.sqlite'), SEED]).code, 2);
-  assert.equal(rehearseCli([SEED, SEED, '--runner', 'rails']).code, 2);
+  assert.equal(rehearseCli([SEED, SEED, '--runner', 'nope']).code, 2);
   assert.equal(rehearseCli([SEED, SEED, '--foreign-keys', 'maybe']).code, 2);
 });
 
@@ -167,4 +167,34 @@ test('the bad and good fixtures rehearse as documented', () => {
   const bad7 = rehearseCli([SEED, join(FIXTURES, 'bad/sqlite/0007_tasks_due.sql')]);
   assert.equal(bad7.code, 1);
   assert.match(bad7.out, /FAILED\s+up/);
+});
+
+const POPULATED = `CREATE TABLE tasks (id INTEGER PRIMARY KEY, title TEXT NOT NULL, priority INTEGER);
+INSERT INTO tasks (id, title, priority) VALUES (1, 'a', 1), (2, 'b', 2), (3, 'c', 3);
+`;
+
+test('a dropped fully populated column is a loss even when a new NOT NULL DEFAULT column has as many values', (t) => {
+  const dir = scratch(t);
+  const seed = put(dir, 'seed.sql', POPULATED);
+  const alter = put(dir, '0001_alter.sql', "ALTER TABLE tasks ADD COLUMN status TEXT NOT NULL DEFAULT 'open';\nALTER TABLE tasks DROP COLUMN priority;\n");
+  const r = rehearseCli([seed, alter]);
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.out, /lost: tasks\.priority dropped with 3 non-NULL value/);
+  assert.ok(!/renamed/.test(r.out));
+  const rebuild = put(dir, '0002_rebuild.sql', [
+    "CREATE TABLE new_tasks (id INTEGER PRIMARY KEY, title TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open');",
+    'INSERT INTO new_tasks (id, title) SELECT id, title FROM tasks;',
+    'DROP TABLE tasks;', 'ALTER TABLE new_tasks RENAME TO tasks;', ''].join('\n'));
+  const second = rehearseCli([seed, rebuild]);
+  assert.equal(second.code, 1, second.out);
+  assert.match(second.out, /priority/);
+});
+
+test('a populated column that is really renamed is still not a loss', (t) => {
+  const dir = scratch(t);
+  const seed = put(dir, 'seed.sql', POPULATED);
+  const file = put(dir, '0001_rename.sql', 'ALTER TABLE tasks RENAME COLUMN priority TO urgency;\n');
+  const r = rehearseCli([seed, file]);
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, /priority renamed to urgency\?/);
 });

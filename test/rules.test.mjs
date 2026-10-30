@@ -5,7 +5,7 @@ import { findings, ids } from './helpers.mjs';
 const has = (sql, rule, ctx) => assert.ok(ids(sql, ctx).includes(rule), `expected ${rule}, got ${ids(sql, ctx)}`);
 const lacks = (sql, rule, ctx) => assert.ok(!ids(sql, ctx).includes(rule), `unexpected ${rule}`);
 
-test('ADD COLUMN is read as a whole: type arguments with commas do not cut the definition (H2)', () => {
+test('ADD COLUMN is read as a whole: type arguments with commas do not cut the definition', () => {
   has('ALTER TABLE orders ADD COLUMN amount numeric(12,2) NOT NULL;', 'not-null-without-default');
   has('ALTER TABLE orders ADD COLUMN amount DECIMAL(65,30) NOT NULL;', 'not-null-without-default', { dialect: 'mysql' });
   const both = ids('ALTER TABLE orders ADD COLUMN a int NOT NULL, DROP COLUMN b;');
@@ -17,7 +17,7 @@ test('ADD COLUMN is read as a whole: type arguments with commas do not cut the d
   has('ALTER TABLE orders ADD COLUMN (a int NOT NULL, b int);', 'not-null-without-default', { dialect: 'mysql' });
 });
 
-test('volatile-default: now() does not rewrite since PG 11 and literals are not function calls (M2)', () => {
+test('volatile-default: now() does not rewrite since PG 11 and literals are not function calls', () => {
   lacks('ALTER TABLE t ADD COLUMN c timestamptz DEFAULT now();', 'volatile-default');
   lacks('ALTER TABLE t ADD COLUMN c timestamptz DEFAULT CURRENT_TIMESTAMP;', 'volatile-default');
   lacks("ALTER TABLE t ADD COLUMN c text DEFAULT 'random';", 'volatile-default');
@@ -27,7 +27,7 @@ test('volatile-default: now() does not rewrite since PG 11 and literals are not 
   has('ALTER TABLE t ADD COLUMN c double precision DEFAULT random();', 'volatile-default');
 });
 
-test('lock rules on existing tables are errors; hygiene rules stay warnings (H1)', () => {
+test('lock rules on existing tables are errors; hygiene rules stay warnings', () => {
   const level = (sql, rule, ctx) => findings(sql, ctx).find((f) => f.rule === rule)?.level;
   assert.equal(level('CREATE INDEX i ON orders (a);', 'index-without-concurrently'), 'error');
   assert.equal(level('ALTER TABLE orders ADD FOREIGN KEY (c) REFERENCES c (id);', 'constraint-without-not-valid'), 'error');
@@ -46,7 +46,7 @@ test('tables created in the same file or an earlier new migration are not "exist
   lacks('ALTER TABLE orders ADD COLUMN c int NOT NULL;', 'not-null-without-default', { createdBefore: new Set(['orders']) });
 });
 
-test('new data-loss and lock rules (M3)', () => {
+test('new data-loss and lock rules', () => {
   has('DROP SCHEMA reporting CASCADE;', 'drop-schema-cascade');
   lacks('DROP SCHEMA reporting;', 'drop-schema-cascade');
   has('DROP MATERIALIZED VIEW daily_totals;', 'drop-materialized-view');
@@ -62,7 +62,7 @@ test('new data-loss and lock rules (M3)', () => {
   lacks("SET lock_timeout = '5s'; ALTER TABLE orders ALTER COLUMN id SET NOT NULL; ALTER TABLE orders ADD CONSTRAINT pk PRIMARY KEY USING INDEX orders_idx;", 'primary-key-using-index');
 });
 
-test('lock_timeout counts only when set before the first ALTER (M3, M4)', () => {
+test('lock_timeout counts only when set before the first ALTER', () => {
   has("ALTER TABLE orders ADD COLUMN c int; SET lock_timeout = '5s';", 'missing-lock-timeout');
   const late = findings("ALTER TABLE orders ADD COLUMN c int; SET lock_timeout = '5s';").find((f) => f.rule === 'missing-lock-timeout');
   assert.match(late.message, /after the first ALTER/);
@@ -72,13 +72,13 @@ test('lock_timeout counts only when set before the first ALTER (M3, M4)', () => 
   lacks("SELECT set_config('lock_timeout', '5s', false); ALTER TABLE orders ADD COLUMN c int;", 'missing-lock-timeout');
 });
 
-test('SET NOT NULL after VALIDATE, or with its check dropped, is the recommended path (M4)', () => {
+test('SET NOT NULL after VALIDATE, or with its check dropped, is the recommended path', () => {
   has('ALTER TABLE orders ALTER COLUMN a SET NOT NULL;', 'set-not-null');
   lacks('ALTER TABLE orders VALIDATE CONSTRAINT orders_a_not_null; ALTER TABLE orders ALTER COLUMN a SET NOT NULL;', 'set-not-null');
   lacks('ALTER TABLE orders ALTER COLUMN a SET NOT NULL; ALTER TABLE orders DROP CONSTRAINT orders_a_not_null;', 'set-not-null');
 });
 
-test('a SQLite trigger with several statements is one statement (M4)', () => {
+test('a SQLite trigger with several statements is one statement', () => {
   const sql = `CREATE TRIGGER t AFTER INSERT ON a BEGIN
     UPDATE b SET n = n + 1;
     UPDATE c SET m = CASE WHEN 1 THEN 2 END;
@@ -87,7 +87,7 @@ test('a SQLite trigger with several statements is one statement (M4)', () => {
   lacks(sql, 'update-all', { dialect: 'sqlite' });
 });
 
-test('MySQL: MODIFY COLUMN and RENAME TABLE are found, no PostgreSQL advice (M1)', () => {
+test('MySQL: MODIFY COLUMN and RENAME TABLE are found, no PostgreSQL advice', () => {
   const r = ids('ALTER TABLE users MODIFY COLUMN name varchar(10);', { dialect: 'mysql' });
   assert.ok(r.includes('change-column-type') && r.includes('mysql-no-algorithm'));
   assert.ok(!r.includes('missing-lock-timeout'));
@@ -96,7 +96,7 @@ test('MySQL: MODIFY COLUMN and RENAME TABLE are found, no PostgreSQL advice (M1)
   has('ALTER TABLE users MODIFY COLUMN name varchar(10);', 'change-column-type');
 });
 
-test('dialect: directive, project dialect and syntax all override the PostgreSQL default (M1)', () => {
+test('dialect: directive, project dialect and syntax all override the PostgreSQL default', () => {
   has('-- migration-lint: dialect mysql\nALTER TABLE t DROP COLUMN c;', 'mysql-no-algorithm');
   has('ALTER TABLE t DROP COLUMN c;', 'mysql-no-algorithm', { projectDialect: 'mysql' });
   has('ALTER TABLE t MODIFY COLUMN c int;', 'mysql-no-algorithm');
@@ -115,7 +115,7 @@ test('rename-column does not fire on RENAME CONSTRAINT or RENAME INDEX', () => {
   has('ALTER TABLE t RENAME a TO b;', 'rename-column');
 });
 
-test('Prisma RedefineTables: the Warnings comment and the rebuilt columns are findings (C2)', () => {
+test('Prisma RedefineTables: the Warnings comment and the rebuilt columns are findings', () => {
   const rebuild = (warnings = '') => `${warnings}
 PRAGMA foreign_keys=OFF;
 CREATE TABLE "new_tasks" ("id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT, "title" TEXT NOT NULL);
@@ -137,10 +137,12 @@ PRAGMA foreign_keys=ON;`;
   const loses = findings(rebuild(), { dialect: 'sqlite', schema }).find((x) => x.rule === 'rebuild-drops-column');
   assert.match(loses.message, /priority/);
   const keeps = new Map([['tasks', new Set(['id', 'title'])]]);
-  assert.deepEqual(ids(rebuild(), { dialect: 'sqlite', schema: keeps, runner: 'prisma' }), []);
+  // Prisma runs the file in an implicit transaction, where its own PRAGMA foreign_keys=OFF does nothing
+  assert.deepEqual(ids(rebuild(), { dialect: 'sqlite', schema: keeps, runner: 'prisma' }), ['transaction-conflict']);
+  assert.deepEqual(ids(rebuild(), { dialect: 'sqlite', schema: keeps, runner: 'raw' }), ['not-atomic']);
 });
 
-test('a rebuild whose INSERT does not copy a column of the old table loses it (C2)', () => {
+test('a rebuild whose INSERT does not copy a column of the old table loses it', () => {
   const sql = `CREATE TABLE new_t (id INTEGER, a TEXT, b TEXT);
 INSERT INTO new_t (id, a) SELECT id, a FROM t;
 DROP TABLE t;
@@ -150,7 +152,7 @@ ALTER TABLE new_t RENAME TO t;`;
   assert.match(f.message, /\bb\b/);
 });
 
-test('transactions: the runner wraps the file, so CONCURRENTLY needs its no-transaction marker (H5)', () => {
+test('transactions: the runner wraps the file, so CONCURRENTLY needs its no-transaction marker', () => {
   const goose = (extra = '') => `${extra}-- +goose Up\nCREATE INDEX CONCURRENTLY i ON orders (a);\n-- +goose Down\nDROP INDEX CONCURRENTLY i;\n`;
   has(goose(), 'concurrently-in-transaction', { runner: 'goose' });
   lacks(goose('-- +goose NO TRANSACTION\n'), 'concurrently-in-transaction', { runner: 'goose' });
@@ -158,14 +160,19 @@ test('transactions: the runner wraps the file, so CONCURRENTLY needs its no-tran
   has(dbmate(''), 'concurrently-in-transaction', { runner: 'dbmate' });
   lacks(dbmate(' transaction:false'), 'concurrently-in-transaction', { runner: 'dbmate' });
   lacks('-- atlas:txmode none\nCREATE INDEX CONCURRENTLY i ON orders (a);', 'concurrently-in-transaction', { runner: 'atlas' });
-  has('CREATE INDEX CONCURRENTLY i ON orders (a);', 'concurrently-in-transaction', { runner: 'flyway' });
+  // Flyway runs a script outside a transaction when every statement in it is non-transactional
+  lacks('CREATE INDEX CONCURRENTLY i ON orders (a);', 'concurrently-in-transaction', { runner: 'flyway' });
+  has('CREATE INDEX CONCURRENTLY i ON orders (a); ANALYZE orders;', 'concurrently-in-transaction', { runner: 'flyway' });
+  has('CREATE INDEX CONCURRENTLY i ON orders (a); CREATE INDEX CONCURRENTLY j ON orders (b); ALTER TABLE orders ADD COLUMN c int;', 'concurrently-in-transaction', { runner: 'flyway' });
+  lacks('CREATE INDEX CONCURRENTLY i ON orders (a); ANALYZE orders;', 'concurrently-in-transaction', { runner: 'flyway', noTransaction: true });
+  lacks('SET lock_timeout = 0; CREATE INDEX CONCURRENTLY i ON orders (a); CREATE INDEX CONCURRENTLY j ON orders (b);', 'concurrently-in-transaction', { runner: 'flyway' });
   // golang-migrate sends the file as one query: an implicit transaction only with several statements
   lacks('CREATE INDEX CONCURRENTLY i ON orders (a);', 'concurrently-in-transaction', { runner: 'golang-migrate' });
   has('CREATE INDEX CONCURRENTLY i ON orders (a); ANALYZE orders;', 'concurrently-in-transaction', { runner: 'golang-migrate' });
   lacks('CREATE INDEX CONCURRENTLY i ON orders (a); ANALYZE orders;', 'concurrently-in-transaction', { runner: 'raw' });
 });
 
-test('a wrapped file with its own BEGIN or PRAGMA foreign_keys conflicts with the runner (H5)', () => {
+test('a wrapped file with its own BEGIN or PRAGMA foreign_keys conflicts with the runner', () => {
   const rebuild = `PRAGMA foreign_keys=OFF;
 CREATE TABLE new_t (id INTEGER);
 INSERT INTO new_t (id) SELECT id FROM t;
@@ -173,9 +180,13 @@ DROP TABLE t;
 ALTER TABLE new_t RENAME TO t;
 PRAGMA foreign_keys=ON;`;
   const pragma = findings(rebuild, { dialect: 'sqlite', runner: 'goose' }).filter((f) => f.rule === 'transaction-conflict');
-  assert.equal(pragma.length, 2);
+  assert.equal(pragma.length, 1, 'reported once per file, not again for foreign_keys=ON');
   assert.equal(pragma[0].level, 'error');
-  assert.match(pragma[0].message, /defer_foreign_keys/);
+  assert.match(pragma[0].message, /no-transaction mode/);
+  assert.match(pragma[0].message, /only helps plain NO ACTION/);
+  assert.equal(findings(rebuild, { dialect: 'sqlite', runner: 'prisma' }).filter((f) => f.rule === 'transaction-conflict').length, 1, 'implicit-transaction runners too');
+  assert.equal(findings(rebuild, { dialect: 'sqlite', runner: 'goose' }).find((f) => f.rule === 'transaction-conflict').level, 'error');
+  assert.ok(!ids(`-- +goose NO TRANSACTION\n${rebuild}`, { dialect: 'sqlite', runner: 'goose' }).includes('transaction-conflict'));
   assert.deepEqual(ids(rebuild, { dialect: 'sqlite', runner: 'raw' }), ['not-atomic']);
   const begin = findings('BEGIN; CREATE TABLE a (id int); COMMIT;', { dialect: 'sqlite', runner: 'drizzle' }).find((f) => f.rule === 'transaction-conflict');
   assert.equal(begin.level, 'error');
@@ -195,4 +206,17 @@ test('not-atomic does not apply when the runner wraps the file', () => {
 test('inside a table created by the same file nothing is data loss', () => {
   lacks('CREATE TABLE t (a int); UPDATE t SET a = 1;', 'update-all');
   lacks('CREATE TABLE t (a int); DROP TABLE t;', 'drop-table');
+});
+
+test('SQL a runner generated (stdin) shows its own transaction: BEGIN means wrapped, none means not', () => {
+  const generated = (sql, runner = 'django') => ids(sql, { runner, generated: true });
+  assert.ok(!generated('BEGIN; CREATE TABLE a (id int); CREATE TABLE b (id int); COMMIT;').includes('transaction-conflict'));
+  assert.ok(!generated('BEGIN; CREATE TABLE a (id int); CREATE TABLE b (id int); COMMIT;').includes('not-atomic'));
+  assert.ok(generated('CREATE TABLE a (id int); CREATE TABLE b (id int);').includes('not-atomic'));
+  assert.ok(!generated('CREATE INDEX CONCURRENTLY i ON orders (a); ANALYZE orders;').includes('concurrently-in-transaction'));
+  assert.ok(generated('BEGIN; CREATE INDEX CONCURRENTLY i ON orders (a); COMMIT;').includes('concurrently-in-transaction'));
+});
+
+test('a DEFAULT E\'..\' string with an escaped quote does not hide the next ALTER action', () => {
+  has(String.raw`ALTER TABLE orders ADD COLUMN a text DEFAULT E'it\'s,x', ADD COLUMN b int NOT NULL;`, 'not-null-without-default');
 });
