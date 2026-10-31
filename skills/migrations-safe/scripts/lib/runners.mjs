@@ -10,7 +10,7 @@
 //             'graph'   order comes from a dependency graph, not from names (not checked)
 //   foreignKeys  SQLite foreign_keys setting of the runner's connections
 //   generatesSql the migrations are code, the SQL is produced at run time
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 
 export const PROFILES = {
@@ -73,11 +73,35 @@ export const PROFILES = {
     layout: 'db/migrate/<timestamp>_name.rb', manifests: [/(^|\/)db\/(schema\.rb|structure\.sql)$/], config: ['config/application.rb'],
     hint: 'run rails db:migrate on a scratch database with the SQL logged and pipe the statements',
   },
+  efcore: {
+    label: 'EF Core migrations', downs: true, wraps: false, order: 'strict', foreignKeys: 'off', generatesSql: true,
+    layout: 'C# migrations with a *ModelSnapshot.cs and the __EFMigrationsHistory table', manifests: [/ModelSnapshot\.cs$/], config: [],
+    hint: 'dotnet ef migrations script --idempotent',
+  },
+  dbup: {
+    label: 'DbUp', downs: false, wraps: false, order: 'lenient', foreignKeys: 'off', generatesSql: false,
+    layout: 'script files run in name order, journaled in the SchemaVersions table', manifests: [], config: [],
+  },
+  sqlpackage: {
+    label: 'SqlPackage (DACPAC)', downs: false, wraps: false, order: 'graph', foreignKeys: 'off', generatesSql: true,
+    layout: 'a .sqlproj compared against the database', manifests: [/\.sqlproj$/], config: [],
+    hint: 'sqlpackage /Action:Script',
+  },
   raw: {
     label: 'plain SQL files', downs: true, wraps: false, order: 'strict', foreignKeys: 'off', generatesSql: false,
     layout: 'any .sql files, applied in name order by something else', manifests: [], config: [],
   },
 };
+
+// Batch separators each runner understands: `GO` (SQL Server), `/` (Oracle PL/SQL) and a script-chosen statement
+// terminator (Db2 `--#SET TERMINATOR`, Liquibase `endDelimiter`). A runner that sends the whole file to the driver
+// as one statement understands none, and the separator reaches the server as a syntax error. `raw` is applied by
+// something this tool cannot see (sqlcmd, SQL*Plus, the Db2 CLP), which reads all three.
+const SEPARATORS = {
+  flyway: ['GO', '/'], liquibase: ['GO', '/', 'terminator'], dbup: ['GO'], sqlpackage: ['GO'], efcore: ['GO'],
+  raw: ['GO', '/', 'terminator'],
+};
+for (const [id, p] of Object.entries(PROFILES)) p.separators = SEPARATORS[id] ?? [];
 
 export const RUNNER_IDS = Object.keys(PROFILES);
 export const DIALECTS = ['postgres', 'sqlite', 'mysql', 'mssql', 'oracle', 'db2'];
@@ -86,9 +110,19 @@ export const profileOf = (id) => ({ id, ...PROFILES[id] });
 
 const CONFIG_PRIORITY = ['prisma', 'drizzle', 'atlas', 'liquibase', 'flyway', 'alembic', 'knex', 'django', 'rails'];
 
+const listDir = (dir) => { try { return readdirSync(dir); } catch { return []; } };
+// Runners recognised by what a directory holds rather than by one config file name.
+const DETECTORS = [
+  ['sqlpackage', (dir) => listDir(dir).find((f) => /\.sqlproj$/i.test(f))],
+  ['efcore', (dir) => [dir, join(dir, 'Migrations')].flatMap((d) => listDir(d)).find((f) => /ModelSnapshot\.cs$/.test(f))],
+  ['dbup', (dir) => listDir(dir).find((f) => /\.csproj$/i.test(f) && /dbup-/i.test(read(join(dir, f))))],
+];
+
 // The runner a file's own markers point to, or null.
 export const runnerFromMarkers = (markers) => {
   if (markers?.liquibase) return { id: 'liquibase', evidence: '--liquibase formatted sql header' };
+  if (markers?.sqlpackage) return { id: 'sqlpackage', evidence: 'tmp_ms_xx_ or :setvar DatabaseName (SqlPackage script)' };
+  if (markers?.efcore) return { id: 'efcore', evidence: '__EFMigrationsHistory (EF Core script)' };
   if (markers?.goose) return { id: 'goose', evidence: '-- +goose marker' };
   if (markers?.dbmate) return { id: 'dbmate', evidence: '-- migrate: marker' };
   if (markers?.sqlMigrate) return { id: 'goose', evidence: '-- +migrate marker (sql-migrate uses goose-style sections)' };
@@ -126,11 +160,27 @@ export const detectRunner = (path, { markers = null, fileName = '' } = {}) => {
       if (hit) return { id, evidence: `${hit} in ${dir}` };
     }
   }
+  for (const [id, find] of DETECTORS) {
+    for (const dir of dirs) {
+      const hit = find(dir);
+      if (hit) return { id, evidence: `${hit} in ${dir}` };
+    }
+  }
   return runnerFromMarkers(markers) ?? runnerFromName(fileName) ?? { id: 'raw', evidence: 'no runner config found' };
 };
 
-export const wrapsFile = (profile, { noTransaction = false, statements = 0 } = {}) =>
-  !noTransaction && (profile.wraps === true || (profile.wraps === 'multi' && statements > 1));
+// Whether the runner wraps a file in a transaction on this dialect. Oracle commits implicitly on every DDL, so
+// there is no transaction to wrap; Django and Alembic wrap only where the database has transactional DDL.
+export const wrapsFor = (profile, dialect) => {
+  if (dialect === 'oracle') return false;
+  if ((profile.id === 'django' || profile.id === 'alembic') && dialect === 'mysql') return false;
+  return profile.wraps;
+};
+
+export const wrapsFile = (profile, { noTransaction = false, statements = 0, dialect = null } = {}) => {
+  const wraps = wrapsFor(profile, dialect);
+  return !noTransaction && (wraps === true || (wraps === 'multi' && statements > 1));
+};
 
 const read = (p) => { try { return readFileSync(p, 'utf8'); } catch { return ''; } };
 const PROVIDERS = { postgresql: 'postgres', postgres: 'postgres', pg: 'postgres', sqlite: 'sqlite', mysql: 'mysql', mariadb: 'mysql', turso: 'sqlite', singlestore: 'mysql',

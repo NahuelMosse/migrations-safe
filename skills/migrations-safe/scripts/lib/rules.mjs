@@ -1,6 +1,6 @@
 // The rule registry and the per-file rules. Every rule id that can be emitted is listed in RULES; the
 // table in references/rules.md is checked against it by the test suite.
-import { DIALECTS, profileOf, resolveDialect, wrapsFile } from './runners.mjs';
+import { DIALECTS, profileOf, resolveDialect, wrapsFile, wrapsFor } from './runners.mjs';
 import { flat, ident, name, parse, splitTopLevel, stripLiterals } from './parse.mjs';
 import { applySchema, cloneSchema, insertTargets, parseAlter } from './schema.mjs';
 import { DEFAULT_MYSQL_VERSION, INDEX_STATEMENT, enumOf, learnStatement, parseMysqlVersion } from './mysql.mjs';
@@ -53,6 +53,7 @@ export const RULES = [
   { id: 'applied-migration-changed', level: ERROR, area: 'history' },
   { id: 'out-of-order', level: ERROR, area: 'history' },
   { id: 'duplicate-sequence', level: ERROR, area: 'history' },
+  { id: 'unsupported-separator', level: WARN, area: 'transaction' },
   { id: 'invalid-directive', level: WARN, area: 'tool' },
   { id: 'unlinted-migration', level: WARN, area: 'tool' },
 ];
@@ -63,7 +64,7 @@ const VOLATILE_FN = /\b(?:random|setseed|gen_random_uuid|uuid_generate_v\w+|cloc
 const DEFAULT_END = /\b(?:not null|null|check|references|unique|primary key|constraint|collate|generated|on update)\b/i;
 const NON_COLUMN_ADD = /^(?:constraint|index|key|unique|primary|foreign|check|fulltext|spatial|partition)\b/i;
 const NOT_COLUMN_DROP = /^drop (?:constraint|index|key|default|not null|primary|foreign|check|partition|expression|identity)\b/i;
-const NON_DDL = /^(?:begin|start transaction|commit|set\b|pragma\b|select\b)/i;
+const NON_DDL = /^(?:begin|start transaction|commit|rollback|end\b|if\b|else\b|use\b|print\b|declare\b|:\w|@|prompt\b|whenever\b|spool\b|exit\b|quit\b|rem\b|define\b|set\b|pragma\b|select\b)/i;
 const TX_START =/^(?:begin|start transaction)\b/i;
 const LOCK_TIMEOUT = /^(?:set\s+(?:session\s+|local\s+)?lock_timeout\b|select\s+set_config\s*\(\s*'lock_timeout')/i;
 const MYSQL_LOCK_WAIT = /^(?:set\s+(?:session\s+|local\s+|@@session\.|@@local\.|@@)?lock_wait_timeout\s*=|set\s+statement\b.*\block_wait_timeout\s*=)/i;
@@ -145,8 +146,8 @@ export const lintSql = (sql, ctx = {}) => {
   const noTransaction = markers.noTransaction || ctx.noTransaction === true || flywayAutoCommit;
   // SQL a runner generated (stdin) shows its own transaction: BEGIN/COMMIT present means wrapped.
   const generated = ctx.generated === true && profile.generatesSql;
-  const wrapped = !generated && wrapsFile(profile, { noTransaction, statements: statements.length });
-  const explicitWrap = !generated && profile.wraps === true && !noTransaction;
+  const wrapped = !generated && wrapsFile(profile, { noTransaction, statements: statements.length, dialect });
+  const explicitWrap = !generated && wrapsFor(profile, dialect) === true && !noTransaction;
   const explicitTx = texts.some((t) => TX_START.test(t));
 
   let directiveState;
@@ -339,8 +340,11 @@ export const lintSql = (sql, ctx = {}) => {
       ? "ALTER TABLE on an existing table without SET lock_timeout: a long query ahead of it makes every read and write queue behind its lock — SET lock_timeout = '5s' and retry on failure"
       : 'lock_timeout is set after the first ALTER TABLE on an existing table, so that ALTER waits for its lock without a limit: move the SET before it', { line: statements[firstLock].line });
 
-  const ddl = texts.filter((t) => !/^(begin|start transaction|commit|set\b|pragma\b|select\b)/i.test(t));
+  const ddl = texts.filter((t) => !NON_DDL.test(t));
   const concurrent = texts.some((t) => /\bconcurrently\b/i.test(t));
+  const missing = profile.id === 'raw' ? [] : [...markers.separators].filter((s) => !profile.separators.includes(s));
+  if (missing.length)
+    add(0, 'unsupported-separator', `${missing.map((s) => (s === 'terminator' ? 'a custom statement terminator' : `\`${s}\``)).join(' and ')} in the file, but ${profile.label} does not split on it: the whole file reaches the driver as one statement and the server answers with a syntax error — use a runner that does (Flyway, Liquibase, DbUp), or send the file with sqlcmd/SQL*Plus/the Db2 CLP`);
   if (dialect !== 'mysql' && ddl.length > 1 && !explicitTx && !concurrent && !wrapped)
     add(0, 'not-atomic', `${ddl.length} statements outside a transaction: a failure halfway leaves the schema between versions — BEGIN/COMMIT, or pass --runner (or add the runner's config file) when the runner wraps each file`);
 

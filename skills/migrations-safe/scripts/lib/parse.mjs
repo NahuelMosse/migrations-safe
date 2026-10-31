@@ -130,7 +130,11 @@ export const parse = (sql, { dialect = 'postgres' } = {}) => {
   const statements = [];
   const directives = [];
   const comments = [];
-  const markers = { goose: false, dbmate: false, sqlMigrate: false, noTransaction: false, rollback: false, liquibase: false };
+  const markers = {
+    goose: false, dbmate: false, sqlMigrate: false, noTransaction: false, rollback: false, liquibase: false,
+    efcore: /__EFMigrationsHistory/.test(sql), sqlpackage: /\btmp_ms_xx_|^\s*:setvar\s+DatabaseName\b/im.test(sql),
+    separators: new Set(), // batch separators the file uses: GO, /, terminator
+  };
   let hasDownSection = false;
   let downSql = '';
   let upEnd = sql.length;
@@ -191,8 +195,8 @@ export const parse = (sql, { dialect = 'postgres' } = {}) => {
       const eol = sql.indexOf('\n', i);
       const rest = sql.slice(i, eol === -1 ? sql.length : eol).trimEnd();
       const skip = () => { i = eol === -1 ? sql.length : eol; };
-      if (mssql && /^go(?:\s+\d+)?\s*(?:--.*)?$/i.test(rest)) { push(); batch++; blockDepth = 0; caseDepth = 0; skip(); continue; }
-      if (oracle && rest === '/') { push({ slash: true }); batch++; rawBlock = false; skip(); continue; }
+      if (mssql && /^go(?:\s+\d+)?\s*(?:--.*)?$/i.test(rest)) { markers.separators.add('GO'); push(); batch++; blockDepth = 0; caseDepth = 0; skip(); continue; }
+      if (oracle && rest === '/') { markers.separators.add('/'); push({ slash: true }); batch++; rawBlock = false; skip(); continue; }
       if (mssql && SQLCMD_COMMAND.test(rest)) { push(); buf = rest; start = line; push({ command: true }); skip(); continue; }
       if (oracle && !buf.trim() && SQLPLUS_COMMAND.test(rest)) { buf = rest; start = line; push({ command: true }); skip(); continue; }
       if (oracle && buf.trim() && ORACLE_BLOCK.test(buf.trimStart()) && ORACLE_DDL_LINE.test(rest)) push({ slash: false });
@@ -203,7 +207,14 @@ export const parse = (sql, { dialect = 'postgres' } = {}) => {
       const body = comment.replace(/^(--|#)\s*/, '').trimEnd();
       if (dialect === 'db2') {
         const term = body.match(/^#\s*SET\s+TERMINATOR\s+(\S+)/i);
-        if (term) { push(); terminator = term[1]; }
+        if (term) { push(); terminator = term[1]; markers.separators.add('terminator'); }
+      }
+      // Liquibase formatted SQL: `--changeset a:1 endDelimiter:// runInTransaction:false`
+      const changeset = body.match(/^changeset\b(.*)$/i);
+      if (changeset) {
+        if (/\brunInTransaction:false\b/i.test(changeset[1])) markers.noTransaction = true;
+        const delimiter = changeset[1].match(/\bendDelimiter:(\S+)/i)?.[1];
+        if (delimiter && !['/', ';', '\\n/', 'GO', '\\nGO'].includes(delimiter) && terminator === ';') { terminator = delimiter; markers.separators.add('terminator'); }
       }
       if (DOWN_MARKER.test(comment)) {
         hasDownSection = true;

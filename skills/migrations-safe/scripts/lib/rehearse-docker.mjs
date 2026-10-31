@@ -307,7 +307,7 @@ export const rehearseDocker = async (opts, print) => {
     let unmeasured = 0;
     const apply = async (file, kind) => {
       const part = partFor(file, kind, eng.dialect);
-      const wrap = wrapsFile(profile, { noTransaction: part.markers.noTransaction, statements: part.statements });
+      const wrap = wrapsFile(profile, { noTransaction: part.markers.noTransaction, statements: part.statements, dialect: eng.dialect });
       const { input, marked } = eng.scriptInput(part.sql, { wrap, marks: true });
       const before = current;
       const a = performance.now();
