@@ -12,6 +12,7 @@
 //   generatesSql the migrations are code, the SQL is produced at run time
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
+import { hintedDialect } from './dialect-hints.mjs';
 
 export const PROFILES = {
   prisma: {
@@ -187,16 +188,21 @@ const PROVIDERS = { postgresql: 'postgres', postgres: 'postgres', pg: 'postgres'
   sqlserver: 'mssql', mssql: 'mssql', oracle: 'oracle', oracledb: 'oracle', db2: 'db2',
 };
 
-// Dialect the project declares: Prisma's migration_lock.toml, a Drizzle config.
+// Dialect of the project that owns `path`. `declared` ones come from a file whose job is to name the provider
+// (Prisma's migration_lock.toml, a Drizzle config). The rest is inferred from the nearest directory upwards that
+// holds a hint (see dialect-hints.mjs): { dialect, evidence, conflict } or, when the hints disagree among
+// themselves, { dialect: null, ambiguous }.
 export const projectDialect = (path) => {
   for (const dir of ancestors(startDir(path))) {
     const lock = read(join(dir, 'migration_lock.toml'));
     const provider = lock.match(/provider\s*=\s*"([\w]+)"/)?.[1]?.toLowerCase();
-    if (provider && PROVIDERS[provider]) return { dialect: PROVIDERS[provider], evidence: `migration_lock.toml in ${dir}` };
+    if (provider && PROVIDERS[provider]) return { dialect: PROVIDERS[provider], evidence: `migration_lock.toml in ${dir}`, declared: true };
     for (const cfg of ['drizzle.config.ts', 'drizzle.config.js', 'drizzle.config.mjs', 'drizzle.config.cjs', 'drizzle.config.json']) {
       const m = read(join(dir, cfg)).match(/dialect['"]?\s*[:=]\s*['"]([\w]+)['"]/i);
-      if (m && PROVIDERS[m[1].toLowerCase()]) return { dialect: PROVIDERS[m[1].toLowerCase()], evidence: `${cfg} in ${dir}` };
+      if (m && PROVIDERS[m[1].toLowerCase()]) return { dialect: PROVIDERS[m[1].toLowerCase()], evidence: `${cfg} in ${dir}`, declared: true };
     }
+    const hinted = hintedDialect(dir);
+    if (hinted) return hinted;
   }
   return null;
 };
@@ -204,7 +210,10 @@ export const projectDialect = (path) => {
 // Dialect from the syntax of a file; comments are ignored (Prisma writes backticks in its warnings).
 // Markers that belong to one product come first, and only markers PostgreSQL does not use: `[x]` must be an
 // identifier (PostgreSQL has `int[]` and `a[1]`), and GENERATED ... IDENTITY says nothing about Db2.
-export const sniffDialect = (sql) => {
+export const sniffDialect = (sql) => sniffMarkers(sql) ?? 'postgres';
+
+// Same, but null when the syntax carries no marker of any engine (plain SQL that every engine accepts).
+export const sniffMarkers = (sql) => {
   if (/^\s*--#\s*SET\s+TERMINATOR\b/im.test(sql)) return 'db2';
   const code = sql.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/--[^\n]*/g, ' ');
   const bare = code.replace(/'(?:[^']|'')*'/g, "''");
@@ -214,7 +223,7 @@ export const sniffDialect = (sql) => {
     || /\bsp_rename\b|\bnvarchar\b|\bidentity\s*\(\s*\d|\bgetdate\s*\(|\bset\s+nocount\b|\bwith\s*\(\s*online\s*=/i.test(bare)) return 'mssql';
   if (/^\s*\/\s*$/m.test(bare) || /\bvarchar2\b|\bnvarchar2\b|\bexecute\s+immediate\b|\bfrom\s+dual\b|\bddl_lock_timeout\b|\bdbms_\w+|\bset\s+unused\b|\benable\s+novalidate\b|\bnumber\s*\(\s*\d|\bmodify\s*\(/i.test(bare)) return 'oracle';
   if (/\bengine\s*=|\bauto_increment\b|\bunsigned\b|\bmodify\s+(?:column\s+)?[\w`]|\brename\s+table\b|`\w+`/i.test(code)) return 'mysql';
-  return 'postgres';
+  return null;
 };
 
 export const fileDialectDirective = (sql) => sql.match(/^\s*--\s*migration-lint:\s*dialect\s+(\w+)/im)?.[1]?.toLowerCase();
@@ -223,4 +232,18 @@ export const fileDialectDirective = (sql) => sql.match(/^\s*--\s*migration-lint:
 export const resolveDialect = (sql, { dialect, projectDialect } = {}) => {
   const requested = dialect ?? fileDialectDirective(sql) ?? projectDialect;
   return DIALECTS.includes(requested) ? requested : sniffDialect(sql);
+};
+
+// Like resolveDialect for the lint driver, but says where the answer came from. Order: --dialect, the file's
+// directive, a provider the project declares (Prisma, Drizzle), markers in the syntax, the engine inferred from
+// the project's files, and last PostgreSQL as an assumption. `project` is what projectDialect returned.
+export const decideDialect = (sql, { dialect, project } = {}) => {
+  if (DIALECTS.includes(dialect)) return { dialect, source: 'option' };
+  const directive = fileDialectDirective(sql);
+  if (DIALECTS.includes(directive)) return { dialect: directive, source: 'directive' };
+  if (project?.declared) return { dialect: project.dialect, source: 'declared', evidence: project.evidence };
+  const marked = sniffMarkers(sql);
+  if (marked) return { dialect: marked, source: 'syntax' };
+  if (project?.dialect) return { dialect: project.dialect, source: 'inferred', evidence: project.evidence, conflict: project.conflict };
+  return { dialect: 'postgres', source: 'assumed', ambiguous: project?.ambiguous ?? null };
 };

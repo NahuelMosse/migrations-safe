@@ -7,7 +7,9 @@ import { decodeSql } from './parse.mjs';
 export const USAGE = `usage: migration-lint.mjs <file|dir|->... [options]
 
   --dialect postgres|sqlite|mysql|mssql|oracle|db2
-                                    default: from the file, the project (migration_lock.toml, drizzle config) or its syntax
+                                    default: from the file, the project (migration_lock.toml, drizzle config, flyway/liquibase
+                                    jdbc URL, .sqlproj, EF Core provider, compose image) or its syntax; PostgreSQL is assumed,
+                                    and said so, when nothing names the engine
   --runner <id>                     prisma|drizzle|flyway|liquibase|goose|dbmate|golang-migrate|atlas|alembic|django|knex|
                                     efcore|dbup|sqlpackage|raw; default: detected from the project's config files
   --server-version <v>              server the rules assume: MySQL 8.0 (default), 8.0.28, 8.4, 5.7, mariadb-10.6;

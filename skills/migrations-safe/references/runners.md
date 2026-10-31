@@ -7,7 +7,16 @@ Detection order: `--runner`; the project's config files (searched upwards from t
 root, including a `.sqlproj`, a `*ModelSnapshot.cs` and a `.csproj` that references `dbup-`); markers inside the
 file (`-- +goose`, `-- migrate:up`, `__EFMigrationsHistory`, `tmp_ms_xx_`); the file name; otherwise `raw`.
 Dialect: `--dialect`; a `-- migration-lint: dialect sqlite` line; `migration_lock.toml` (provider `sqlserver`
-too) or the Drizzle config; the syntax; otherwise PostgreSQL. Syntax markers, strongest first: `--#SET
+too) or the Drizzle config; the syntax; the engine the project's files name; otherwise PostgreSQL, and then the
+run prints `dialect assumed to be PostgreSQL` with how to change it. The project's files are read in the nearest
+directory upwards that holds one, most specific first: the jdbc URL in `flyway.conf` / `flyway.toml` /
+`liquibase.properties`, a Liquibase changelog `dbms`, an SSDT `.sqlproj` (SQL Server); the EF Core / DbUp provider
+package in a `.csproj` and the connection strings in `appsettings*.json`; the `image:` of a compose file
+(`mcr.microsoft.com/mssql/server`, `gvenzl/oracle-*`, `container-registry.oracle.com/database`,
+`icr.io/db2_community/db2`, `postgres`, `mysql`, `mariadb`). If a more specific source disagrees with a less
+specific one the first wins and the run warns, naming the other; if sources of the same rank disagree (a compose
+file with SQL Server and Oracle) nothing is chosen, PostgreSQL is assumed and the warning lists them: pass
+`--dialect`. Syntax markers beat an inferred engine. Syntax markers, strongest first: `--#SET
 TERMINATOR`, `ADMIN_CMD`, `SYSPROC.`, `SET CURRENT LOCK TIMEOUT` mean Db2; `GO` alone on a line, a `[bracketed]`
 identifier, `sp_rename`, `nvarchar` mean SQL Server; `/` alone on a line, `VARCHAR2`, `EXECUTE IMMEDIATE`,
 `FROM dual` mean Oracle; backticks, `AUTO_INCREMENT`, `MODIFY COLUMN` mean MySQL; `PRAGMA`, `AUTOINCREMENT` mean
