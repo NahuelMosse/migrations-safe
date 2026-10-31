@@ -22,10 +22,15 @@ MySQL and MariaDB at the depth of PostgreSQL, and rehearsal on real servers.
   loads a `.sql` seed or `--dump` (pg_dump plain or custom format, mysqldump, `.gz`), applies migrations in
   order with the runner's transaction wrapping and down sections, and reports per migration the duration, the
   write-blocking locks held (`pg_locks`, `performance_schema.metadata_locks`, MariaDB `METADATA_LOCK_INFO`,
-  polled from a second session), and the row and column-fingerprint diff. `--down` runs up, down, up and
-  compares the schema with the seed. A lock held longer than `--lock-budget` (default 2s) fails the run.
-  The container is removed on success, failure and SIGINT; `--keep` leaves it and prints how to remove it.
-  Exit 2 when docker is missing, its daemon does not answer or the image cannot be pulled.
+  polled from a second session), and the row and column-fingerprint diff. Durations are taken inside the
+  server. `--down` runs up, down, up and compares the schema with the seed. A lock held longer than
+  `--lock-budget` (default 2s) fails the run. Lock measurement is proven first with a probe lock (MySQL 5.7's
+  disabled instrument is switched on; exit 2 if it still cannot be seen), and a migration whose polling
+  session failed is reported `UNMEAS.` and fails the run instead of claiming no lock. PostgreSQL snapshots
+  cover every schema; `.sql.gz` seeds are unpacked; a seed or dump that leaves no tables is exit 2.
+  The container has no network and is removed on success, failure, SIGINT and SIGTERM (exit 130, 143);
+  `--keep` leaves it and prints how to remove it. A hard kill leaves it, and the next run removes containers
+  whose process is gone. Exit 2 when docker is missing, its daemon does not answer or the image cannot be pulled.
 - Docker rehearsal tests run when docker is available and report `skipped: docker not available` otherwise;
   CI has a Linux job that runs them against `postgres:16` and `mysql:8.4`.
 

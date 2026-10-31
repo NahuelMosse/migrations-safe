@@ -55,7 +55,8 @@ jobs:
     runs-on: ubuntu-latest
     env:
       MSAFE_REQUIRE_DOCKER: '1'
-      MSAFE_DOCKER_ENGINES: postgres:16,mysql:8.4
+      # mysql:5.7 ships the metadata-lock instrument disabled; mariadb needs its metadata_lock_info plugin
+      MSAFE_DOCKER_ENGINES: postgres:16,mysql:8.4,mysql:5.7,mariadb:11
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -65,6 +66,9 @@ jobs:
         run: |
           docker pull postgres:16
           docker pull mysql:8.4
+          docker pull mysql:5.7
+          docker pull mariadb:11
+          docker pull alpine:latest
       - name: Docker rehearsal tests
         run: node --test test/rehearse-docker.test.mjs
       - name: Rehearse the seeds on PostgreSQL and MySQL
@@ -74,6 +78,9 @@ jobs:
           printf 'ALTER TABLE orders ADD COLUMN due_on date NULL, ALGORITHM=INSTANT;\n' > /tmp/my-add.sql
           node $S/scripts/rehearse.mjs --engine postgres:16 $S/fixtures/seed-postgres.sql /tmp/pg-add.sql
           node $S/scripts/rehearse.mjs --engine mysql:8.4 $S/fixtures/seed-mysql.sql /tmp/my-add.sql
+          node $S/scripts/rehearse.mjs --engine mariadb:11 $S/fixtures/seed-mysql.sql /tmp/my-add.sql
+          printf 'ALTER TABLE orders ADD COLUMN due_on date NULL;\n' > /tmp/my57-add.sql
+          node $S/scripts/rehearse.mjs --engine mysql:5.7 $S/fixtures/seed-mysql.sql /tmp/my57-add.sql
       - name: No rehearsal container is left behind
         if: always()
         run: |

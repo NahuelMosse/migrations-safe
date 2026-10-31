@@ -323,14 +323,14 @@ if (pgEngine) {
 
   test(`${pgEngine}: a .sql.gz seed is unpacked, and a seed or dump that leaves no tables is exit 2`, { skip, timeout: 900000 }, (t) => {
     const dir = scratch(t);
-    const up = put(dir, '0001_add.sql', 'ALTER TABLE users ADD COLUMN nickname text;\n');
+    const up = put(dir, '0001_add.sql', 'ALTER TABLE users ADD COLUMN flag int;\n');
     const gz = join(dir, 'seed.sql.gz');
     writeFileSync(gz, gzipSync(readFileSync(PG_SEED)));
     const loaded = cli(['--engine', pgEngine, gz, up]);
     t.after(() => { const n = containerOf(loaded.out); if (n) remove(n); });
     assert.equal(loaded.code, 0, loaded.out + loaded.err);
     assert.match(loaded.out, /\(2 table\(s\), 7 row\(s\)\)/);
-    assert.match(loaded.out, /users\s+rows 3\s+columns: \+nickname/);
+    assert.match(loaded.out, /users\s+rows 3\s+columns: \+flag/);
 
     const empty = put(dir, 'empty-seed.sql', 'SELECT 1;\n');
     const none = cli(['--engine', pgEngine, empty, up]);
@@ -361,7 +361,7 @@ if (pgEngine) {
   test(`${pgEngine}: a polling session that dies mid-run means locks are not measured, and the run fails`, { skip, timeout: 900000 }, (t) => {
     const dir = scratch(t);
     const kill = put(dir, '0001_kill_poller.sql', "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name = 'msafe-poller';\nSELECT pg_sleep(1);\n");
-    const slow = put(dir, '0002_slow.sql', 'ALTER TABLE users ADD COLUMN nickname text;\nSELECT pg_sleep(1);\n');
+    const slow = put(dir, '0002_slow.sql', 'ALTER TABLE users ADD COLUMN flag int;\nSELECT pg_sleep(1);\n');
     const r = cli(['--engine', pgEngine, PG_SEED, kill, slow]);
     t.after(() => { const n = containerOf(r.out); if (n) remove(n); });
     assert.equal(r.code, 1, r.out + r.err);
