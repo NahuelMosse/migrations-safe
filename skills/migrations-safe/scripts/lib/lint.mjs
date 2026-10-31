@@ -6,9 +6,12 @@ import { UsageError } from './errors.mjs';
 import { HistoryError, historyFindings, isMigrationFile } from './history.mjs';
 import { decodeSql, flat, parse } from './parse.mjs';
 import { ERROR, WARN, lintSql } from './rules.mjs';
-import { PROFILES, RUNNER_IDS, DIALECTS, detectRunner, fileDialectDirective, profileOf, projectDialect, runnerFromMarkers, sniffDialect } from './runners.mjs';
+import { PROFILES, RUNNER_IDS, DIALECTS, detectRunner, fileDialectDirective, profileOf, projectDialect, resolveDialect, runnerFromMarkers, sniffDialect } from './runners.mjs';
 import { applySql, cloneSchema } from './schema.mjs';
-import { DEFAULT_MYSQL_VERSION, learnStatement, mysqlVersionOrThrow, parseMysqlVersion, projectMysqlVersion } from './mysql.mjs';
+import { DEFAULT_MYSQL_VERSION, learnStatement, mysqlVersionOrThrow, parseMysqlVersion } from './mysql.mjs';
+import { DEFAULT_EDITION, DEFAULT_SERVER_VERSION, EDITIONS, editionOrThrow, parseServerVersion, projectServerVersion, serverVersionOrThrow } from './server-version.mjs';
+
+const DISPLAY_NAME = { mysql: 'MySQL', mssql: 'SQL Server', oracle: 'Oracle', db2: 'Db2' };
 
 export { UsageError };
 
@@ -132,11 +135,15 @@ export const lintTargets = (opts) => {
     }
   }
 
-  const requestedVersion = opts.mysqlVersion ? mysqlVersionOrThrow(opts.mysqlVersion) : null;
+  if (opts.mysqlVersion) mysqlVersionOrThrow(opts.mysqlVersion);
+  const requestedFor = (dialect) => {
+    const text = dialect === 'mysql' ? (opts.mysqlVersion ?? opts.serverVersion) : opts.serverVersion;
+    return text ? { v: serverVersionOrThrow(dialect, text), flag: dialect === 'mysql' && opts.mysqlVersion ? '--mysql-version' : '--server-version' } : null;
+  };
   const versionOfDir = new Map();
   // What earlier files and --schema files taught about ENUMs, indexes, column types and instant row versions.
   const shared = { instantVersions: new Map(), enums: new Map(), indexed: new Map(), defs: new Map() };
-  const serverNow = { v: requestedVersion ?? parseMysqlVersion(DEFAULT_MYSQL_VERSION) };
+  const serverNow = { v: parseMysqlVersion(opts.mysqlVersion ?? opts.serverVersion) ?? parseMysqlVersion(DEFAULT_MYSQL_VERSION) };
   const linted = new Set(); // files the rules already learned from, so replaying them would count twice
   const learn = (sql, file) => {
     if (file && linted.has(file)) return;
@@ -147,28 +154,38 @@ export const lintTargets = (opts) => {
   const schemaOf = createSchemaSource(seed, learn);
   const createdBefore = new Set();
   const dialectOfDir = new Map();
+  let editionUsed = false;
   for (const input of inputs) {
     const markers = parse(input.sql).markers;
     const detected = input.file ? detectRunner(input.file, { markers, fileName: basename(input.file) }) : (runnerFromMarkers(markers) ?? { id: 'raw' });
     const profile = profileOf(opts.runner ?? detected.id);
     if (input.file && !dialectOfDir.has(dirname(input.file))) dialectOfDir.set(dirname(input.file), projectDialect(input.file)?.dialect);
-    if (input.file && !versionOfDir.has(dirname(input.file))) versionOfDir.set(dirname(input.file), projectMysqlVersion(dirname(input.file)));
-    const declared = input.file ? versionOfDir.get(dirname(input.file)) : null;
-    const mysqlVersion = requestedVersion ?? declared?.version ?? parseMysqlVersion(DEFAULT_MYSQL_VERSION);
-    serverNow.v = mysqlVersion;
+    const projectDialectHere = input.file ? dialectOfDir.get(dirname(input.file)) : undefined;
+    const dialect = resolveDialect(input.sql, { dialect: opts.dialect, projectDialect: projectDialectHere });
+    const dirKey = input.file ? `${dirname(input.file)}|${dialect}` : null;
+    if (dirKey && !versionOfDir.has(dirKey)) versionOfDir.set(dirKey, projectServerVersion(dirname(input.file), dialect));
+    const declared = dirKey ? versionOfDir.get(dirKey) : null;
+    const requested = requestedFor(dialect);
+    const serverVersion = requested?.v ?? declared?.version ?? parseServerVersion(dialect, DEFAULT_SERVER_VERSION[dialect]);
+    const mysqlVersion = dialect === 'mysql' ? serverVersion : undefined;
+    const edition = EDITIONS[dialect] ? (opts.edition ? editionOrThrow(dialect, opts.edition) : DEFAULT_EDITION[dialect]) : null;
+    if (edition && opts.edition) editionUsed = true;
+    if (mysqlVersion) serverNow.v = mysqlVersion;
     const schema = input.file ? schemaOf(input.file) : cloneSchema(seed);
     if (input.file) linted.add(input.file);
     const r = lintSql(input.sql, {
-      dialect: opts.dialect, projectDialect: input.file ? dialectOfDir.get(dirname(input.file)) : undefined, profile,
+      dialect, projectDialect: projectDialectHere, profile,
       schema, createdBefore,
       generated: !input.file, noTransaction: input.file ? flywayNoTransaction(input.file) : false,
-      mysqlVersion, ...shared,
+      serverVersion, edition, ...(mysqlVersion ? { mysqlVersion } : {}), ...shared,
     });
-    if (r.dialect === 'mysql') {
-      const note = `MySQL rules assume ${mysqlVersion.label} (${requestedVersion ? '--mysql-version' : declared ? declared.evidence : `default, pass --mysql-version to change it`})`;
+    if (r.dialect !== 'postgres' && r.dialect !== 'sqlite') {
+      const source = requested ? requested.flag : declared ? declared.evidence : `default, pass ${r.dialect === 'mysql' ? '--mysql-version' : '--server-version'} to change it`;
+      const editionNote = edition ? `, ${edition} edition (${opts.edition ? '--edition' : 'default: the conservative one, pass --edition to change it'})` : '';
+      const note = `${DISPLAY_NAME[r.dialect]} rules assume ${serverVersion.label}${editionNote} (${source})`;
       if (!notes.includes(note)) notes.push(note);
-      if (!requestedVersion && declared?.conflict) {
-        const warning = `the server versions declared next to the migrations disagree (${declared.conflict.join(', ')}): using the oldest, ${mysqlVersion.label}, so the rules hold on every one of them — pass --mysql-version to choose`;
+      if (!requested && declared?.conflict) {
+        const warning = `the server versions declared next to the migrations disagree (${declared.conflict.join(', ')}): using the oldest, ${serverVersion.label}, so the rules hold on every one of them — pass ${r.dialect === 'mysql' ? '--mysql-version' : '--server-version'} to choose`;
         if (!notes.includes(warning)) notes.push(warning);
       }
     }
@@ -179,6 +196,7 @@ export const lintTargets = (opts) => {
       findings.push({ level: WARN, rule: 'missing-down', file: input.label, line: 1, message: 'no way back: add a down (x.down.sql, down.sql, a Down section) that runs, or declare `-- migration-lint: irreversible -- <recovery plan>`' });
   }
 
+  if (opts.edition && !editionUsed) editionOrThrow('postgres', opts.edition);
   const errors = findings.filter((f) => f.level === ERROR).length;
   return {
     files: inputs.length, errors, warnings: findings.length - errors, findings, notes,

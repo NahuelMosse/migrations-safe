@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { parseMysqlVersion, projectMysqlVersion } from '../skills/migrations-safe/scripts/lib/mysql.mjs';
+import { parseMysqlVersion } from '../skills/migrations-safe/scripts/lib/mysql.mjs';
+import { projectServerVersion } from '../skills/migrations-safe/scripts/lib/server-version.mjs';
+const projectMysqlVersion = (p) => projectServerVersion(p, 'mysql');
 import { RULES } from '../skills/migrations-safe/scripts/lib/rules.mjs';
 import { findings, ids, lintCli, put, scratch } from './helpers.mjs';
 

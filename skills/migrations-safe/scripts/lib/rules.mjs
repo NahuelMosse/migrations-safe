@@ -1,6 +1,6 @@
 // The rule registry and the per-file rules. Every rule id that can be emitted is listed in RULES; the
 // table in references/rules.md is checked against it by the test suite.
-import { DIALECTS, fileDialectDirective, profileOf, sniffDialect, wrapsFile } from './runners.mjs';
+import { DIALECTS, profileOf, resolveDialect, wrapsFile } from './runners.mjs';
 import { flat, ident, name, parse, splitTopLevel, stripLiterals } from './parse.mjs';
 import { applySchema, cloneSchema, insertTargets, parseAlter } from './schema.mjs';
 import { DEFAULT_MYSQL_VERSION, INDEX_STATEMENT, enumOf, learnStatement, parseMysqlVersion } from './mysql.mjs';
@@ -119,8 +119,7 @@ const parseDirectives = (directives, add) => {
 
 // Lints the up part of one migration. ctx: { dialect, projectDialect, profile, schema, createdBefore }.
 export const lintSql = (sql, ctx = {}) => {
-  const requested = ctx.dialect ?? fileDialectDirective(sql) ?? ctx.projectDialect;
-  const dialect = DIALECTS.includes(requested) ? requested : sniffDialect(sql);
+  const dialect = resolveDialect(sql, ctx);
   const pg = dialect === 'postgres';
   const my = dialect === 'mysql';
   const mysqlVersion = ctx.mysqlVersion ?? parseMysqlVersion(DEFAULT_MYSQL_VERSION);
