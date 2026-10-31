@@ -62,8 +62,8 @@ test('lint-cli: --server-version and --edition are validated and appear in the n
   const f = put(dir, '0001.sql', '-- migration-lint: dialect mssql\nSELECT 1;\n');
   const run = (...extra) => lintCli([f, '--format', 'json', ...extra]);
   const notes = (r) => JSON.parse(r.out).notes.join('\n');
-  assert.match(notes(run()), /SQL Server rules assume SQL Server 2022, standard edition \(default/);
-  assert.match(notes(run('--server-version', '2016', '--edition', 'enterprise')), /SQL Server 2016, enterprise edition \(--edition\).*\(--server-version\)/);
+  assert.match(notes(run()), /SQL Server rules assume SQL Server 2022 \(default.*\), standard edition, the conservative default/);
+  assert.match(notes(run('--server-version', '2016', '--edition', 'enterprise')), /SQL Server 2016 \(--server-version\), enterprise edition, from --edition/);
   assert.equal(run('--edition', 'se2').code, 2);
   assert.match(run('--server-version', 'nope').out, /unknown SQL Server version/);
   const pg = put(dir, 'pg/0001.sql', 'SELECT 1;\n');

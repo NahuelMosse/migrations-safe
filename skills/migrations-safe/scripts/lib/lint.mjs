@@ -181,8 +181,8 @@ export const lintTargets = (opts) => {
     });
     if (r.dialect !== 'postgres' && r.dialect !== 'sqlite') {
       const source = requested ? requested.flag : declared ? declared.evidence : `default, pass ${r.dialect === 'mysql' ? '--mysql-version' : '--server-version'} to change it`;
-      const editionNote = edition ? `, ${edition} edition (${opts.edition ? '--edition' : 'default: the conservative one, pass --edition to change it'})` : '';
-      const note = `${DISPLAY_NAME[r.dialect]} rules assume ${serverVersion.label}${editionNote} (${source})`;
+      const editionNote = edition ? `, ${edition} edition, ${opts.edition ? 'from --edition' : 'the conservative default, pass --edition to change it'}` : '';
+      const note = `${DISPLAY_NAME[r.dialect]} rules assume ${serverVersion.label} (${source})${editionNote}`;
       if (!notes.includes(note)) notes.push(note);
       if (!requested && declared?.conflict) {
         const warning = `the server versions declared next to the migrations disagree (${declared.conflict.join(', ')}): using the oldest, ${serverVersion.label}, so the rules hold on every one of them — pass ${r.dialect === 'mysql' ? '--mysql-version' : '--server-version'} to choose`;

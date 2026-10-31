@@ -84,7 +84,7 @@ const rulesOf = (dir, extra = []) => {
 };
 
 test('fixtures: good ones are clean even with --fail-on warning, bad ones fail with exactly the advertised rules', () => {
-  for (const dir of ['good/postgres', 'good/sqlite', 'good/mysql']) assert.deepEqual(rulesOf(dir, ['--strict']), { code: 0, found: [] }, dir);
+  for (const dir of ['good/postgres', 'good/sqlite', 'good/mysql', 'good/mssql']) assert.deepEqual(rulesOf(dir, ['--strict']), { code: 0, found: [] }, dir);
   assert.deepEqual(rulesOf('bad/postgres').found, [
     'error:change-column-type', 'error:concurrently-in-transaction', 'error:constraint-without-not-valid', 'error:drop-column',
     'error:drop-table', 'error:index-without-concurrently', 'error:not-null-without-default', 'error:rename-column',
@@ -105,5 +105,15 @@ test('fixtures: good ones are clean even with --fail-on warning, bad ones fail w
     'warning:mysql-lock-wait-timeout', 'warning:mysql-lock-wait-timeout', 'warning:mysql-no-algorithm', 'warning:mysql-table-rebuild',
   ]);
   assert.deepEqual(rulesOf('bad/sqlite-rebuild').found, ['error:prisma-data-loss-warning', 'warning:missing-down', 'warning:not-atomic']);
-  for (const dir of ['bad/postgres', 'bad/sqlite', 'bad/postgres-locks', 'bad/mysql', 'bad/sqlite-rebuild']) assert.equal(rulesOf(dir).code, 1, dir);
+  assert.deepEqual(rulesOf('bad/mssql').found, [
+    'error:drop-column', 'error:mssql-add-not-null-default', 'error:mssql-alter-column', 'error:mssql-constraint-with-check', 'error:mssql-index-offline',
+    'error:mssql-online-unsupported-edition', 'error:rename-column', 'warning:missing-down', 'warning:mssql-constraint-nocheck',
+    'warning:mssql-lock-timeout', 'warning:not-atomic',
+  ]);
+  assert.deepEqual(rulesOf('bad/mssql-efcore').found, [
+    'error:drop-column', 'error:mssql-add-not-null-default', 'warning:missing-down', 'warning:mssql-lock-timeout', 'warning:not-atomic',
+  ]);
+  assert.deepEqual(rulesOf('bad/mssql-dacpac').found, ['error:rebuild-drops-column']);
+  assert.deepEqual(rulesOf('bad/mssql-goose').found, ['warning:unsupported-separator']);
+  for (const dir of ['bad/postgres', 'bad/sqlite', 'bad/postgres-locks', 'bad/mysql', 'bad/sqlite-rebuild', 'bad/mssql', 'bad/mssql-efcore', 'bad/mssql-dacpac']) assert.equal(rulesOf(dir).code, 1, dir);
 });

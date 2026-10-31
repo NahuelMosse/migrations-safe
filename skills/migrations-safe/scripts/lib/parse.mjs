@@ -321,7 +321,7 @@ export const downPart = (sql) => { const p = parse(sql); return p.hasDownSection
 
 // ── Small SQL text helpers ───────────────────────────────────────────────────────────────────────
 
-export const ident = String.raw`(?:"[^"]+"|\`[^\`]+\`|\[[^\]]+\]|[\w$]+)(?:\.(?:"[^"]+"|\`[^\`]+\`|[\w$]+))*`;
+export const ident = String.raw`(?:"[^"]+"|\`[^\`]+\`|\[[^\]]+\]|[\w$]+)(?:\.(?:"[^"]+"|\`[^\`]+\`|\[[^\]]+\]|[\w$]+))*`;
 // Last part of a possibly qualified identifier: unquoted names are case-folded, quoted ones keep their case.
 export const name = (raw) => {
   const last = (raw ?? '').trim().match(/("[^"]+"|`[^`]+`|\[[^\]]+\]|[\w$]+)$/)?.[1] ?? '';

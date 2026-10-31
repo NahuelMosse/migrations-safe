@@ -5,6 +5,9 @@ import { flat, ident, name, parse, splitTopLevel, stripLiterals } from './parse.
 import { applySchema, cloneSchema, insertTargets, parseAlter } from './schema.mjs';
 import { DEFAULT_MYSQL_VERSION, INDEX_STATEMENT, enumOf, learnStatement, parseMysqlVersion } from './mysql.mjs';
 import { GOT, mysqlAlterRules as mysqlRules } from './mysql-rules.mjs';
+import { DEFAULT_EDITION, DEFAULT_SERVER_VERSION, parseServerVersion } from './server-version.mjs';
+import { normalizeTsqlActions, spRename } from './mssql.mjs';
+import { DROP_COLUMN_NOTE, mssqlAlterRules, mssqlIndexRules } from './mssql-rules.mjs';
 
 export const ERROR = 'error';
 export const WARN = 'warning';
@@ -45,6 +48,13 @@ export const RULES = [
   { id: 'mysql-column-position', level: WARN, area: 'lock' },
   { id: 'mysql-instant-row-versions', level: WARN, area: 'lock' },
   { id: 'mysql-change-column-rename', level: WARN, area: 'running code' },
+  { id: 'mssql-add-not-null-default', level: ERROR, area: 'lock' },
+  { id: 'mssql-alter-column', level: ERROR, area: 'lock' },
+  { id: 'mssql-index-offline', level: ERROR, area: 'lock' },
+  { id: 'mssql-online-unsupported-edition', level: ERROR, area: 'lock' },
+  { id: 'mssql-lock-timeout', level: WARN, area: 'lock' },
+  { id: 'mssql-constraint-with-check', level: ERROR, area: 'lock' },
+  { id: 'mssql-constraint-nocheck', level: WARN, area: 'lock' },
   { id: 'missing-lock-timeout', level: WARN, area: 'lock' },
   { id: 'concurrently-in-transaction', level: ERROR, area: 'transaction' },
   { id: 'transaction-conflict', level: WARN, area: 'transaction' },
@@ -86,6 +96,8 @@ const sourceTables = (texts) => {
     if (ins) copiedFrom.set(name(ins[2]), name(ins[1]));
     const ren = t.match(new RegExp(String.raw`^alter table (${ident}) rename to (${ident})`, 'i'));
     if (ren) renamedTo.set(name(ren[1]), name(ren[2]));
+    const sp = spRename(t);
+    if (sp?.kind === 'object') renamedTo.set(sp.table, name(sp.to));
   }
   return { copiedFrom, renamedTo };
 };
@@ -123,6 +135,9 @@ export const lintSql = (sql, ctx = {}) => {
   const dialect = resolveDialect(sql, ctx);
   const pg = dialect === 'postgres';
   const my = dialect === 'mysql';
+  const ms = dialect === 'mssql';
+  const serverVersion = ctx.serverVersion ?? parseServerVersion(dialect, DEFAULT_SERVER_VERSION[dialect]);
+  const edition = ctx.edition ?? DEFAULT_EDITION[dialect];
   const mysqlVersion = ctx.mysqlVersion ?? parseMysqlVersion(DEFAULT_MYSQL_VERSION);
   // State that outlives one file: instant row versions, ENUM definitions and indexed columns per table.
   const instantVersions = ctx.instantVersions ?? new Map();
@@ -181,15 +196,17 @@ export const lintSql = (sql, ctx = {}) => {
     state: { enums, indexed, defs, instantVersions },
   });
 
-  const alterRules = (k, table, actions, text) => {
+  const alterRules = (k, table, rawActions, text) => {
     const existing = isExisting(table);
+    const actions = ms ? normalizeTsqlActions(rawActions) : rawActions;
     if (my && existing) mysqlAlterRules(k, table, actions);
+    if (ms && existing) mssqlAlterRules({ add: (rule, message, extra) => add(k, rule, message, extra), table, actions, version: serverVersion, edition });
     if (dialect === 'mysql' && !/\balgorithm\s*=/i.test(text))
       add(k, 'mysql-no-algorithm', `ALTER TABLE ${table} without ALGORITHM/LOCK may copy the table under lock: declare ALGORITHM=INSTANT (alone, it takes no LOCK clause) or ALGORITHM=INPLACE, LOCK=NONE so it fails instead; for a COPY on a big table use gh-ost`);
     for (const a of actions) {
       let m;
       if (/^drop column\b/i.test(a) || (/^drop\s+\S/i.test(a) && !NOT_COLUMN_DROP.test(a)))
-        add(k, 'drop-column', `drops a column of ${table}: the running code still selects or inserts it — contract step only, after a release that stopped using it, with a backup and a recorded approval`);
+        add(k, 'drop-column', `drops a column of ${table}: the running code still selects or inserts it — contract step only, after a release that stopped using it, with a backup and a recorded approval${ms ? DROP_COLUMN_NOTE : ''}`);
       const renamesColumn = a.match(/^rename (?:column )?(?!to\b|constraint\b|as\b|index\b|key\b)\S+ to \S+/i)
         || (dialect === 'mysql' && (m = a.match(/^change (?:column )?(\S+) (\S+)/i)) && name(m[1]) !== name(m[2]));
       if (renamesColumn)
@@ -257,6 +274,16 @@ export const lintSql = (sql, ctx = {}) => {
       if (isExisting(alter.table) && firstLock === -1) firstLock = k;
       if (alter.wait && lockTimeoutAt === -1) lockTimeoutAt = k;
       if (my && !isExisting(alter.table)) learnStatement(t, maps, mysqlVersion);
+    }
+    if (ms) {
+      if (mssqlIndexRules({ add: (rule, message, extra) => add(k, rule, message, extra), text: t, isExisting, edition }) && firstLock === -1) firstLock = k;
+      if (/\bwait_at_low_priority\b/i.test(t) && lockTimeoutAt === -1) lockTimeoutAt = k;
+      const sp = spRename(t);
+      if (sp?.kind === 'column' && isExisting(sp.table))
+        add(k, 'rename-column', `renames a column of ${sp.table} in one step (sp_rename): the code in production still uses the old name — expand (add new, write both, backfill), switch reads, contract later`);
+      if (sp?.kind === 'object' && !created.has(sp.table) && !rebuilt(name(sp.to)))
+        add(k, 'rename-table', `renames table ${sp.table} in one step (sp_rename): create the new one (or a view with the old name) and move readers first`);
+      if (sp && firstLock === -1 && isExisting(sp.table)) firstLock = k;
     }
     if (my) {
       const optimize = t.match(new RegExp(String.raw`^optimize (?:(?:no_write_to_binlog|local) )?table (.*)$`, 'i'));
@@ -334,6 +361,11 @@ export const lintSql = (sql, ctx = {}) => {
     add(firstLock, 'mysql-lock-wait-timeout', lockTimeoutAt === -1
       ? `DDL on an existing table without SET SESSION lock_wait_timeout: the statement waits for the table's metadata lock behind any open transaction (even an idle one) and every later query on the table queues behind it — SET SESSION lock_wait_timeout = 5 (MariaDB also accepts \`WAIT 5\` on the ALTER) and retry with backoff`
       : 'lock_wait_timeout is set after the first DDL on an existing table, so that statement waits for its lock without a limit: move the SET before it', { line: statements[firstLock].line });
+
+  if (ms && firstLock !== -1 && (lockTimeoutAt === -1 || lockTimeoutAt > firstLock))
+    add(firstLock, 'mssql-lock-timeout', lockTimeoutAt === -1
+      ? "DDL on an existing table without SET LOCK_TIMEOUT: the statement waits for its schema lock behind any open transaction without a limit, and every later query on the table queues behind it — SET LOCK_TIMEOUT 5000 (milliseconds) first, or WAIT_AT_LOW_PRIORITY on the online rebuild / SWITCH (SQL Server 2014+), and retry on failure"
+      : 'LOCK_TIMEOUT is set after the first DDL on an existing table, so that statement waits for its lock without a limit: move the SET before it', { line: statements[firstLock].line });
 
   if (pg && firstLock !== -1 && (lockTimeoutAt === -1 || lockTimeoutAt > firstLock))
     add(firstLock, 'missing-lock-timeout', lockTimeoutAt === -1
