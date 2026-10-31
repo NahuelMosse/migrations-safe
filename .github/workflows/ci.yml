@@ -145,7 +145,11 @@ jobs:
           left=$(docker ps -aq --filter label=msafe-rehearse=1)$(docker network ls -q --filter label=msafe-rehearse=1)
           if [ -n "$left" ]; then echo "left behind:"; docker ps -a --filter label=msafe-rehearse=1; docker network ls --filter label=msafe-rehearse=1; exit 1; fi
 
+  # A skipped job shows its name, so the name says why it is skipped on pull requests and push, and what covers it:
+  # the Db2 image needs a privileged x86_64 daemon and many minutes to start; the Db2 lint rules run on every OS in
+  # the test job (test/db2.test.mjs, fixtures good/db2 and bad/db2).
   docker-db2:
+    name: docker-db2 (skipped on pull requests and push - privileged x86_64 daemon, slow start; runs on schedule and workflow_dispatch; Db2 lint rules are covered by the test job on every OS)
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     timeout-minutes: 90
     runs-on: ubuntu-latest

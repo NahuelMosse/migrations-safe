@@ -262,7 +262,13 @@ const dockerUp = () => {
 const available = dockerUp();
 const disabled = process.env.MSAFE_DOCKER_TESTS === '0';
 const required = process.env.MSAFE_REQUIRE_DOCKER === '1';
-const skip = disabled ? 'skipped: docker tests disabled (MSAFE_DOCKER_TESTS=0)' : available ? false : 'skipped: docker not available';
+// A skipped Docker test says why, and what covers the situation it skips: the engines' scripts, error parsing and
+// the lint rules run on every OS without Docker, and the rehearsals themselves run in the CI jobs below.
+const COVERED = 'covered without Docker by the unit tests in this file and test/*.test.mjs on every OS, and with Docker by the CI jobs docker-rehearsal, docker-mssql, docker-oracle (every pull request) and docker-db2 (schedule and workflow_dispatch)';
+const skip = disabled ? `skipped: docker tests disabled (MSAFE_DOCKER_TESTS=0); ${COVERED}` : available ? false : `skipped: docker not available, so nothing was rehearsed; ${COVERED}`;
+// The Db2 image needs a privileged x86_64 daemon and many minutes to start.
+const DB2_NOTE = 'the Db2 rehearsal needs a privileged x86_64 Docker daemon and runs in CI job docker-db2 (schedule and workflow_dispatch); the Db2 lint rules are covered on every OS by test/db2.test.mjs';
+const db2Skip = skip ? `${skip}; ${DB2_NOTE}` : process.arch === 'x64' ? false : `skipped: ${DB2_NOTE} (this machine is ${process.arch}, so nothing was rehearsed)`;
 const ENGINES = (process.env.MSAFE_DOCKER_ENGINES ?? 'postgres:16,mysql:8.4').split(',').map((s) => s.trim()).filter(Boolean);
 
 test('docker is available when the run requires it', { skip: !required || disabled }, () => {
@@ -328,10 +334,11 @@ const familyOf = (engine) => ({ mariadb: 'mysql' }[engine.split(':')[0]] ?? engi
 for (const engine of ENGINES) {
   const family = familyOf(engine);
   const sc = SCENARIOS[family];
+  const skipHere = family === 'db2' ? db2Skip : skip;
   const label = engine;
   if (!sc) continue;
 
-  test(`${label}: ups report diffs and locks, a lock over the budget and a lossy migration fail, the container is removed`, { skip, timeout: 1500000 }, (t) => {
+  test(`${label}: ups report diffs and locks, a lock over the budget and a lossy migration fail, the container is removed`, { skip: skipHere, timeout: 1500000 }, (t) => {
     const dir = scratch(t);
     const add = put(dir, '0001_add.sql', sc.add);
     const lock = put(dir, '0002_lock.sql', sc.lock);
@@ -356,7 +363,7 @@ for (const engine of ENGINES) {
     assert.ok(!exists(name), `${name} must be removed`);
   });
 
-  test(`${label}: --dump loads tolerating errors; --down runs up, down, up; a lock inside the budget passes`, { skip, timeout: 1500000 }, (t) => {
+  test(`${label}: --dump loads tolerating errors; --down runs up, down, up; a lock inside the budget passes`, { skip: skipHere, timeout: 1500000 }, (t) => {
     const dir = scratch(t);
     const dump = put(dir, 'dump.sql', sc.dump);
     const up = put(dir, '0001_nick.sql', sc.up);
@@ -377,7 +384,7 @@ for (const engine of ENGINES) {
     assert.ok(!exists(containerOf(r.out)));
   });
 
-  test(`${label}: a failing migration stops the rest and the container is still removed`, { skip, timeout: 1500000 }, (t) => {
+  test(`${label}: a failing migration stops the rest and the container is still removed`, { skip: skipHere, timeout: 1500000 }, (t) => {
     const dir = scratch(t);
     const bad = put(dir, '0001_bad.sql', sc.bad);
     const after = put(dir, '0002_after.sql', sc.after);
@@ -415,7 +422,7 @@ if (oraEngine) {
 
 const db2Engine = ENGINES.find((e) => e.startsWith('db2:'));
 if (db2Engine) {
-  test(`${db2Engine}: a migration that leaves a table REORG-pending fails, one that runs the REORG passes`, { skip, timeout: 3600000 }, (t) => {
+  test(`${db2Engine}: a migration that leaves a table REORG-pending fails, one that runs the REORG passes`, { skip: db2Skip, timeout: 3600000 }, (t) => {
     const dir = scratch(t);
     const drop = put(dir, '0001_drop.sql', 'ALTER TABLE orders DROP COLUMN note;\n');
     const r = cli(['--engine', db2Engine, '--allow-loss', 'orders.note', SCENARIOS.db2.seed, drop]);
