@@ -37,9 +37,25 @@ wrapped file shows the cascade deletes it would cause in production.
 
 Exit 0 all ran and nothing was lost, 1 a migration failed or lost data, 2 could not run.
 
-## PostgreSQL, MySQL and MariaDB (Docker)
+## PostgreSQL, MySQL, MariaDB, SQL Server, Oracle and Db2 (Docker)
 
-Same engine and version as production, never SQLite as a stand-in.
+Same engine and version as production, never SQLite as a stand-in. Images: `postgres`, `mysql`, `mariadb`,
+`mcr.microsoft.com/mssql/server`, `gvenzl/oracle-free`, `icr.io/db2_community/db2` (`--engine mssql:2022-latest`,
+`oracle:23-slim-faststart`, `db2:11.5.9.0`). Per-engine details are in [mssql.md](mssql.md),
+[oracle.md](oracle.md) and [db2.md](db2.md):
+
+| Engine | Client | Seed and migrations | Locks read from | Edition |
+|---|---|---|---|---|
+| SQL Server | `sqlcmd` (tools18 or tools) | `GO` batches, SQLCMD commands | `sys.dm_tran_locks` (Sch-M, X, SIX, S; a queued Sch-M too) | `--edition standard` runs Express (2019, 2022) or Standard Developer (2025), `enterprise` Developer; the edition read back must match, else exit 2; Express stops at 10 GB per database |
+| Oracle | `sqlplus -S -L` | rebuilt from the parsed statements, `/` after PL/SQL | `v$lock` (TM, modes 4 to 6), `dba_ddl_locks` | Free only: SE2 is not emulated and the run says ONLINE, MOVE ONLINE and `DBMS_REDEFINITION` pass here and fail on SE2 |
+| Db2 | `db2 -td~` as `db2inst1` | rebuilt from the parsed statements | `MON_GET_LOCKS` (Z, X, S, SIX) | Community Edition; also reads `REORG_PENDING` after each migration |
+
+Oracle and Db2 containers run on a private Docker network with no outside access (their instances do not start
+without a non-loopback interface) instead of `--network none`; the network is named like the container and is
+removed with it. SQL Server and Oracle keep their data on the container's disk (O_DIRECT is not available on a
+memory-backed directory) and need several minutes for a first start; Db2 needs `--privileged`. Oracle and Db2 DDL
+commits implicitly, so a failed migration leaves the statements before the failing one applied, and the output
+says so.
 
 ```bash
 node "${CLAUDE_SKILL_DIR}/scripts/rehearse.mjs" --engine postgres:16 seed.sql 0007.up.sql 0008.up.sql
@@ -83,7 +99,9 @@ then the ups again, and the tables and columns are compared with the seed.
   makes that migration `UNMEAS.`: its locks are unknown, the run fails, and "no lock" is never printed.
   A lock on several modes of one table is one line (`AccessExclusiveLock + ShareLock on t`). PostgreSQL: `pg_locks` joined with
   `pg_stat_activity` for the migration's session, modes that block writes (`AccessExclusiveLock`,
-  `ExclusiveLock`, `ShareRowExclusiveLock`, `ShareLock`). MySQL: `performance_schema.metadata_locks`
+  `ExclusiveLock`, `ShareRowExclusiveLock`, `ShareLock`). SQL Server, Oracle and Db2 are in the table above; each has
+  its own self-test (a table lock held with `TABLOCKX, HOLDLOCK` plus `WAITFOR`, `LOCK TABLE ... EXCLUSIVE MODE`
+  plus `DBMS_SESSION.SLEEP`, `LOCK TABLE` plus `DBMS_ALERT.SLEEP`), and Db2 has a second one for REORG-pending. MySQL: `performance_schema.metadata_locks`
   (`EXCLUSIVE`, `SHARED_NO_WRITE`, `SHARED_NO_READ_WRITE`, `SHARED_READ_ONLY`). MariaDB:
   `information_schema.METADATA_LOCK_INFO` from its `metadata_lock_info` plugin. The time a lock is held is
   first to last poll plus one poll interval, so a lock shorter than the interval may not be seen, and the numbers

@@ -3,7 +3,7 @@
 A Claude Code skill, and a standalone CLI, for writing and reviewing database migrations that do not lose
 data, break the code already running, or lock a busy table.
 
-- `migration-lint`: static checks over SQL migrations (PostgreSQL, SQLite, MySQL), plus git history checks
+- `migration-lint`: static checks over SQL migrations (PostgreSQL, SQLite, MySQL, SQL Server, Oracle, Db2 LUW), plus git history checks
   for applied migrations that were edited, renamed, deleted, out of order or duplicated.
 - `rehearse`: applies migrations to a copy of a SQLite database, or to a throwaway PostgreSQL, MySQL or
   MariaDB Docker container seeded from a `.sql` file or a dump, and reports rows and columns per table, lost
@@ -39,9 +39,9 @@ node skills/migrations-safe/scripts/rehearse.mjs --engine postgres:16 seed.sql d
 node skills/migrations-safe/scripts/rehearse.mjs --engine mysql:8.4 --dump prod-subset.sql.gz 0007.sql --lock-budget 1s
 ```
 
-Lint options: `--runner`, `--dialect`, `--mysql-version`, `--fail-on warning|error|<rule>,...`,
+Lint options: `--runner`, `--dialect`, `--server-version` (`--mysql-version`), `--edition`, `--fail-on warning|error|<rule>,...`,
 `--format text|json|sarif|github`, `--base`, `--repo`, `--schema`; `--help` lists them. Rehearsal options:
-`--engine`, `--dump`, `--down`, `--runner`, `--lock-budget`, `--keep`, `--disk`, `--allow-loss`. Exit codes: 0 nothing at the failure level, 1 findings,
+`--engine`, `--edition`, `--dump`, `--down`, `--runner`, `--lock-budget`, `--keep`, `--disk`, `--allow-loss`. Exit codes: 0 nothing at the failure level, 1 findings,
 2 could not run (never a pass: 0 files linted, a shallow clone, bad arguments, a crash).
 
 ## Support matrix
@@ -67,6 +67,9 @@ Alembic, Django, Knex and Rails generate SQL at run time: pipe it in with `-`.
 | PostgreSQL | all rules (locks, `CONCURRENTLY`, `NOT VALID`, defaults, transactions) | Docker `--engine postgres:<tag>`: duration, `pg_locks`, row and column diff, up-down-up |
 | MySQL 5.7, 8.0, 8.4 | `mysql-*` rules per server version (`--mysql-version`): `ALGORITHM` support, metadata-lock timeout, foreign keys, FULLTEXT/SPATIAL, primary keys, charset, ENUM, rebuilds, instant row versions; gh-ost / pt-online-schema-change advice | Docker `--engine mysql:<tag>`: duration, `performance_schema.metadata_locks`, diff, up-down-up |
 | MariaDB 10.3+ | same rules with MariaDB's instant-DDL versions (`--mysql-version mariadb-10.6`) | Docker `--engine mariadb:<tag>`: metadata locks through the `metadata_lock_info` plugin |
+| SQL Server 2016+ | `mssql-*` rules by version and edition (`--server-version`, `--edition standard\|enterprise\|azure`): online DDL, NOT NULL defaults, `LOCK_TIMEOUT`, constraints, `sp_rename`; `GO` batches, EF Core and DACPAC scripts | Docker `--engine mssql:<tag>`: Express, Standard Developer or Developer by edition, `sys.dm_tran_locks` |
+| Oracle 11g+ | `oracle-*` rules (`--edition se2\|ee`): defaults before 12.1, `DDL_LOCK_TIMEOUT`, implicit commits, `ONLINE`, `NOVALIDATE`, missing `/` | Docker `--engine oracle:<tag>` (Free; SE2 is not emulated), `v$lock` |
+| Db2 LUW 10.5+ | `db2-*` rules: REORG-pending after `DROP COLUMN`/`SET NOT NULL`/`SET DATA TYPE`, REORG limit, constraint checks, lock timeout | Docker `--engine db2:<tag>`, `MON_GET_LOCKS`, `REORG_PENDING` check (scheduled in CI) |
 | SQLite | generic rules, table rebuild checks | bundled `node:sqlite`, no Docker |
 
 The linter is regex-based; for PostgreSQL also run `squawk`. Server-engine rehearsals need the `docker` CLI and
@@ -126,7 +129,7 @@ node skills/migrations-safe/scripts/migration-lint.mjs skills/migrations-safe/fi
 ```
 
 The Docker rehearsal tests start containers (`postgres:16`, `mysql:8.4` by default; `MSAFE_DOCKER_ENGINES=postgres:17,mariadb:11`
-changes them). Without Docker they are reported as `skipped: docker not available`; `MSAFE_REQUIRE_DOCKER=1` turns
+changes them; `mssql:2022-latest`, `oracle:23-slim-faststart` and `db2:11.5.9.0` run the other engines, which take minutes to start). Without Docker they are reported as `skipped: docker not available`; `MSAFE_REQUIRE_DOCKER=1` turns
 that into a failure and `MSAFE_DOCKER_TESTS=0` skips them on purpose.
 
 Trigger evals live in `evals/` (run them with `claude plugin eval . --scaffold --allow-tools Bash`: four cases

@@ -29,10 +29,10 @@ The same commands work in PowerShell: `${CLAUDE_SKILL_DIR}` is replaced with the
 shell sees the command, so it is not an environment variable.
 
 - Needs Node 22.13+. No database needed; reads `.sql` files or SQL on stdin (`-`). The rehearsal in step 4
-  needs the `docker` CLI for PostgreSQL, MySQL and MariaDB.
+  needs the `docker` CLI for PostgreSQL, MySQL, MariaDB, SQL Server, Oracle and Db2.
 - The runner (Prisma, Drizzle, Flyway, Liquibase, goose, dbmate, golang-migrate, Atlas, Alembic, Django,
-  Knex, Rails, or plain SQL) and the dialect (PostgreSQL, SQLite, MySQL) are detected from the project; override
-  with `--runner` and `--dialect`. Details per runner, and how to feed Alembic, Django, Knex and Rails:
+  Knex, Rails, EF Core, DbUp, SqlPackage, or plain SQL) and the dialect (PostgreSQL, SQLite, MySQL, SQL Server,
+  Oracle, Db2) are detected from the project; override with `--runner` and `--dialect`. Details per runner, and how to feed Alembic, Django, Knex and Rails:
   [references/runners.md](references/runners.md). Read it when the project uses any of them.
 - Exit 0 nothing at the failure level, 1 findings, **2 could not run, which is never a pass** (0 files
   linted, shallow clone, bad arguments).
@@ -78,6 +78,16 @@ Load it when a finding needs explaining. In short:
   waits (`SET SESSION lock_wait_timeout`), foreign keys, FULLTEXT, primary keys, ENUM, charset and rebuilds.
   Pass `--mysql-version 8.0.28|8.4|mariadb-10.6` (default 8.0, or the image in the project's compose file); big
   tables go through gh-ost or pt-online-schema-change. Tables and caveats: [references/mysql.md](references/mysql.md).
+- **SQL Server** (`mssql-*`): online DDL needs Enterprise, so the rules depend on `--edition standard|enterprise|azure`
+  (default `standard`) and `--server-version 2016|2019|2022|2025`: NOT NULL with a default, `ALTER COLUMN`,
+  offline index builds, `ONLINE` on an edition without it, `LOCK_TIMEOUT`, `WITH CHECK` constraints. Details:
+  [references/mssql.md](references/mssql.md).
+- **Oracle** (`oracle-*`): `--edition se2|ee` (default `se2`), `--server-version`: column defaults before 12.1,
+  `DDL_LOCK_TIMEOUT` (Oracle fails at once instead of queueing), DDL that commits earlier DML, `ONLINE`,
+  `ENABLE NOVALIDATE`, a PL/SQL block without `/`. Details: [references/oracle.md](references/oracle.md).
+- **Db2 LUW** (`db2-*`): `DROP COLUMN`, `SET NOT NULL` and `SET DATA TYPE` leave the table REORG-pending until
+  a `CALL SYSPROC.ADMIN_CMD('REORG TABLE t')`, at most three such units of work, constraint checks, lock
+  timeout. Details: [references/db2.md](references/db2.md).
 - **Transactions and rollback** (`concurrently-in-transaction`, `transaction-conflict`, `not-atomic`,
   `missing-down`): know whether the runner wraps the file; a down that runs, or an `irreversible` plan.
 - **History** (`applied-migration-changed`, `out-of-order`, `duplicate-sequence`): restore the applied file
@@ -104,8 +114,8 @@ drop, rename). The linter checks the rebuild against the table as earlier migrat
 
 ### 4. Rehearse on a copy with realistic data
 
-An empty test database proves almost nothing. SQLite is rehearsed on a copy of the file; PostgreSQL, MySQL
-and MariaDB on a throwaway Docker container of the same engine and version as production:
+An empty test database proves almost nothing. SQLite is rehearsed on a copy of the file; PostgreSQL, MySQL,
+MariaDB, SQL Server, Oracle and Db2 on a throwaway Docker container of the same engine and version as production:
 
 ```bash
 node "${CLAUDE_SKILL_DIR}/scripts/rehearse.mjs" app.db db/migrations/0007_due.sql
@@ -118,7 +128,8 @@ Every run applies the migrations in order the way the runner does (transaction w
 reports, per table, rows and columns added, dropped or emptied. It fails on lost rows or values and on
 migrations that do not run; SQLite also on new foreign-key orphans. With `--engine` it also reports each
 migration's duration and the write-blocking locks it held (PostgreSQL `pg_locks`, MySQL and MariaDB metadata
-locks, polled from a second session), and fails when one is held longer than `--lock-budget` (default 2s).
+locks, SQL Server `sys.dm_tran_locks`, Oracle `v$lock`, Db2 `MON_GET_LOCKS`, polled from a second session; Db2
+also fails a migration that leaves a table REORG-pending), and fails when one is held longer than `--lock-budget` (default 2s).
 The container is removed when the run ends, also on failure, Ctrl+C and SIGTERM (a hard kill leaves it; the
 next run sweeps it); `--keep` leaves it and prints how to remove it.
 Exit 2 means docker is missing or cannot pull the image, never a pass. How to seed, read the output and what
@@ -142,5 +153,8 @@ reason**. Do not loop on warnings by editing around them, and do not add an `all
   Table sizes are unknown: a lock error on a ten-row table can be allowed with that reason; on a
   hundred-million-row table it is an outage.
 - ORM migrations in Ruby, Python or TypeScript are not read; lint the SQL they produce.
-- No SQL Server or Oracle rules. MySQL and MariaDB are covered at the depth of the online DDL tables (see
-  step 3), for the server version given with `--mysql-version`; Percona and other forks follow MySQL.
+- MySQL and MariaDB are covered at the depth of the online DDL tables (see step 3), for the server version
+  given with `--mysql-version`; Percona and other forks follow MySQL. SQL Server, Oracle and Db2 LUW have rules
+  by version and edition; T-SQL without semicolons is split by keyword heuristics, not a parser. Db2 for z/OS
+  and Db2 for i are not covered, and Azure SQL is linted (`--edition azure`) but not rehearsed. Oracle SE2 is
+  not emulated by the rehearsal (Free has the Enterprise features).

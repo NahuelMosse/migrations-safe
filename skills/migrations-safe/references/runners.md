@@ -1,13 +1,17 @@
 # Runners and dialects
 
 Load this when the project uses one of these tools, or when the linter's runner or dialect guess looks
-wrong. `--runner <id>` and `--dialect postgres|sqlite|mysql` override detection.
+wrong. `--runner <id>` and `--dialect postgres|sqlite|mysql|mssql|oracle|db2` override detection.
 
 Detection order: `--runner`; the project's config files (searched upwards from the file to the repository
-root); markers inside the file (`-- +goose`, `-- migrate:up`); the file name; otherwise `raw`.
-Dialect: `--dialect`; a `-- migration-lint: dialect sqlite` line; `migration_lock.toml` or the Drizzle
-config; the syntax (backticks, `AUTO_INCREMENT`, `MODIFY COLUMN` mean MySQL; `PRAGMA`, `AUTOINCREMENT`
-mean SQLite); otherwise PostgreSQL.
+root, including a `.sqlproj`, a `*ModelSnapshot.cs` and a `.csproj` that references `dbup-`); markers inside the
+file (`-- +goose`, `-- migrate:up`, `__EFMigrationsHistory`, `tmp_ms_xx_`); the file name; otherwise `raw`.
+Dialect: `--dialect`; a `-- migration-lint: dialect sqlite` line; `migration_lock.toml` (provider `sqlserver`
+too) or the Drizzle config; the syntax; otherwise PostgreSQL. Syntax markers, strongest first: `--#SET
+TERMINATOR`, `ADMIN_CMD`, `SYSPROC.`, `SET CURRENT LOCK TIMEOUT` mean Db2; `GO` alone on a line, a `[bracketed]`
+identifier, `sp_rename`, `nvarchar` mean SQL Server; `/` alone on a line, `VARCHAR2`, `EXECUTE IMMEDIATE`,
+`FROM dual` mean Oracle; backticks, `AUTO_INCREMENT`, `MODIFY COLUMN` mean MySQL; `PRAGMA`, `AUTOINCREMENT` mean
+SQLite. `GENERATED ... IDENTITY` and `int[]` say nothing: PostgreSQL has both.
 
 | Runner | Detected by | Lint input | Downs | Wraps each file in a transaction | Order |
 |---|---|---|---|---|---|
@@ -23,11 +27,21 @@ mean SQLite); otherwise PostgreSQL.
 | `django` | `manage.py` | `python manage.py sqlmigrate <app> <n>` piped to `-` | yes | yes (`atomic`) | graph |
 | `knex` | `knexfile.*` | statements logged while it runs on a scratch database, piped to `-` | yes | yes | strict |
 | `rails` | `config/application.rb`, `db/migrate/*.rb` | SQL logged while `rails db:migrate` runs on a scratch database, piped to `-` | yes | yes | lenient |
+| `efcore` | `*ModelSnapshot.cs`, `__EFMigrationsHistory` in the SQL | `dotnet ef migrations script --idempotent` piped to `-` | yes | no (the script shows its own) | strict |
+| `dbup` | a `.csproj` with `dbup-*` | the script files | no | no | lenient |
+| `sqlpackage` | a `.sqlproj`, `tmp_ms_xx_`, `:setvar DatabaseName` | `sqlpackage /Action:Script` piped to `-` | no | no (the script shows its own) | graph |
 | `raw` | nothing found | any `.sql` | yes | no | strict |
 
 What a profile changes in the findings:
 
 - `missing-down` only for runners with downs.
+- Oracle commits every DDL implicitly, so no runner wraps a file on Oracle, whatever its profile says; Django and
+  Alembic do not wrap on MySQL either.
+- A batch separator the runner does not understand is `unsupported-separator`: Flyway splits on `GO` (SQL
+  Server) and `/` (Oracle); Liquibase on those and on `endDelimiter:`; DbUp, `sqlpackage` and EF Core scripts
+  use `GO`; goose, dbmate, golang-migrate, Atlas, Prisma and Drizzle send the file to the driver whole (read from
+  each project's documentation, not run here). `raw` is applied by something this tool cannot see (sqlcmd,
+  SQL*Plus, the Db2 CLP) and reads all of them. Liquibase formatted SQL also reads `runInTransaction:false`.
 - `not-atomic` and `transaction-conflict` depend on whether the runner already wraps the file; a
   `CONCURRENTLY` statement in a wrapped file is `concurrently-in-transaction` even with no `BEGIN`.
 - `--history` ignores manifests (`_journal.json`, snapshots, `atlas.sum`, `migration_lock.toml`, master
@@ -55,6 +69,10 @@ alembic upgrade head --sql | node "${CLAUDE_SKILL_DIR}/scripts/migration-lint.mj
   db:migrate:status` only lists versions; it prints no SQL.
 - **Knex**: no dry-run SQL. Run `knex migrate:latest` on a scratch database with `DEBUG=knex:query`, or
   write the risky steps as `knex.raw` SQL and lint that.
+- **EF Core and SqlPackage**: `dotnet ef migrations script --idempotent` and `sqlpackage /Action:Script` produce
+  T-SQL; pipe it to `migration-lint.mjs -`. The `IF NOT EXISTS (...) BEGIN ... END` guard and `EXEC(N'...')`
+  wrapper EF writes are looked through; a DACPAC table rebuild (`tmp_ms_xx_<table>`, `sp_rename`) is checked for
+  columns the new table drops.
 - **Prisma, Drizzle, EF Core, Django**: generated migrations are drafts. Generate without applying
   (`prisma migrate dev --create-only`, `drizzle-kit generate`), read the SQL, split or edit it before it
   reaches main. `prisma db push` and `drizzle-kit push` never touch a shared database.

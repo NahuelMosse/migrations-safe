@@ -29,7 +29,7 @@ test('SKILL.md: frontmatter, size, variables and links', () => {
   assert.match(text, /Node 22\.13\+/);
   assert.match(text, /0 errors, or each remaining finding is allowed in the file with its\s+reason/);
   for (const [, link] of text.matchAll(/\]\((references\/[^)]+)\)/g)) assert.ok(existsSync(join(SKILL, link)), link);
-  for (const ref of ['rules', 'runners', 'rehearsal', 'mysql']) assert.ok(text.includes(`references/${ref}.md`));
+  for (const ref of ['rules', 'runners', 'rehearsal', 'mysql', 'mssql', 'oracle', 'db2']) assert.ok(text.includes(`references/${ref}.md`));
   assert.ok(!/db:migrate:status` \+/.test(text));
 });
 
@@ -58,7 +58,7 @@ test('packaging files agree with each other', () => {
 test('every eval case has a prompt and a grader', () => {
   const dir = join(ROOT, 'evals');
   const cases = readdirSync(dir, { withFileTypes: true }).filter((d) => d.isDirectory());
-  assert.equal(cases.length, 10);
+  assert.equal(cases.length, 13);
   // cases that need files or a repository seed their workspace with a scaffold
   for (const name of ['review-prisma-migration', 'sqlite-rehearsal', 'migration-number-collision', 'flyway-checksum-mismatch'])
     assert.ok(existsSync(join(dir, name, 'case.yaml')), `${name} needs a scaffold`);

@@ -1,0 +1,5 @@
+---
+type: llm
+criteria: "The agent invokes the skill and knows that on SQL Server Standard a NOT NULL column with a DEFAULT is not a metadata change (only Enterprise and Azure do that): it writes every row under a schema modification lock. It adds the column NULL (optionally with the default), backfills in batches outside the migration, then enforces NOT NULL, sets LOCK_TIMEOUT before the DDL, and lints with --edition standard (or says the edition decides the outcome). It does not claim the one-step ADD is online."
+---
+The agent invokes the skill and knows that on SQL Server Standard a NOT NULL column with a DEFAULT is not a metadata change (only Enterprise and Azure do that): it writes every row under a schema modification lock. It adds the column NULL (optionally with the default), backfills in batches outside the migration, then enforces NOT NULL, sets LOCK_TIMEOUT before the DDL, and lints with --edition standard (or says the edition decides the outcome). It does not claim the one-step ADD is online.

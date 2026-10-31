@@ -1,5 +1,37 @@
 # Changelog
 
+## 1.2.0
+
+SQL Server, Oracle and Db2 LUW at the depth MySQL got in 1.1.
+
+- `migration-lint` knows three more dialects, detected from strong syntax markers (`GO`, `[x]`, `sp_rename`;
+  `/`, `VARCHAR2`, `EXECUTE IMMEDIATE`; `--#SET TERMINATOR`, `ADMIN_CMD`, `SYSPROC.`) and never from
+  `GENERATED ... IDENTITY`. `--server-version` (alias `--mysql-version` for MySQL) and `--edition
+  standard|enterprise|azure` (SQL Server) / `se2|ee` (Oracle) select version- and edition-dependent rules; the
+  default edition is the conservative one. The server version is read from a compose file or CI workflow.
+- Parser: `GO [n]` batches, `/` for PL/SQL blocks and procedures, `--#SET TERMINATOR`, `[bracketed]` identifiers,
+  `q'[...]'`, T-SQL scripts without semicolons, `EXEC(N'...')` and `EXECUTE IMMEDIATE` read as the SQL they run,
+  SQLCMD and SQL*Plus commands skipped, names compared without case on SQL Server, Oracle and Db2.
+- SQL Server rules: `mssql-add-not-null-default`, `mssql-alter-column`, `mssql-index-offline`,
+  `mssql-online-unsupported-edition`, `mssql-lock-timeout`, `mssql-constraint-with-check`,
+  `mssql-constraint-nocheck`; `sp_rename` feeds `rename-column` and `rename-table`; DACPAC table rebuilds are
+  checked for lost columns.
+- Oracle rules: `oracle-add-column-default`, `oracle-ddl-lock-timeout`, `oracle-ddl-commits-dml`,
+  `oracle-index-not-online`, `oracle-online-unsupported-edition`, `oracle-constraint-validate`,
+  `oracle-drop-column-rewrites`, `oracle-missing-slash`.
+- Db2 rules: `db2-reorg-pending`, `db2-reorg-offline`, `db2-reorg-limit`, `db2-constraint-check`,
+  `db2-lock-timeout`.
+- Runner profiles: `efcore`, `dbup`, `sqlpackage`; `unsupported-separator` for a `GO`, `/` or terminator the
+  runner does not understand; Oracle files are never wrapped in a transaction by any runner; Liquibase
+  `runInTransaction:false` and `endDelimiter:` are read.
+- `rehearse --engine mssql:<tag>|oracle:<tag>|db2:<tag>` (`--edition standard|enterprise|se2|ee`): SQL Server
+  runs Express, Standard Developer or Developer by `MSSQL_PID` and checks the edition it got; Oracle runs
+  `gvenzl/oracle-free` and says SE2 is not emulated; Db2 also fails a migration that leaves a table
+  REORG-pending. Each engine proves its lock measurement with a self-test before the first migration. Engines
+  live in `scripts/lib/engines/`, each with its own password and database.
+- CI jobs `docker-mssql` and `docker-oracle` run on every pull request; `docker-db2` runs on a schedule and on
+  demand. `references/mssql.md`, `oracle.md` and `db2.md` give each claim with its version and source.
+
 ## 1.1.0
 
 MySQL and MariaDB at the depth of PostgreSQL, and rehearsal on real servers.
