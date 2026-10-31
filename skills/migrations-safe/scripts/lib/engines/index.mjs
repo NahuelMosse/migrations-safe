@@ -2,6 +2,7 @@
 // queries that read the schema back.
 import { makeMssql } from './mssql.mjs';
 import { makeMysql } from './mysql.mjs';
+import { makeOracle } from './oracle.mjs';
 import { makePostgres } from './postgres.mjs';
 
 export { mysqlInput } from './mysql.mjs';
@@ -15,5 +16,6 @@ export const IMAGES = {
 export const makeEngine = (spec, opts = {}) => {
   if (spec.kind === 'postgres') return makePostgres(spec);
   if (spec.kind === 'mssql') return makeMssql(spec, opts);
+  if (spec.kind === 'oracle') return makeOracle(spec, opts);
   return makeMysql(spec);
 };

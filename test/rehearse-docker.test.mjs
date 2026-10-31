@@ -10,7 +10,7 @@ import { FIXTURES, REHEARSE_ANY, put, scratch } from './helpers.mjs';
 // ── unit tests: no docker needed ─────────────────────────────────────────────────────────────────
 
 const cli = (args, { env, cwd } = {}) => {
-  const r = spawnSync(process.execPath, [REHEARSE_ANY, ...args], { encoding: 'utf8', env: env ?? process.env, cwd, windowsHide: true, timeout: 600000 });
+  const r = spawnSync(process.execPath, [REHEARSE_ANY, ...args], { encoding: 'utf8', env: env ?? process.env, cwd, windowsHide: true, timeout: 1500000 });
   return { code: r.status, out: r.stdout, err: r.stderr };
 };
 
@@ -263,6 +263,15 @@ const SCENARIOS = {
     extra: [['0002_proc.sql', '-- +goose Up\n-- +goose StatementBegin\nCREATE PROCEDURE msafe_touch() BEGIN SELECT 1; SELECT 2; END\n-- +goose StatementEnd\n-- +goose Down\nDROP PROCEDURE msafe_touch;\n']],
     bad: 'ALTER TABLE no_such_table ADD COLUMN x int;\n', after: 'ALTER TABLE users ADD COLUMN y int;\n',
   },
+  oracle: {
+    seed: join(FIXTURES, 'seed-oracle.sql'), add: 'ALTER TABLE orders ADD (due_on DATE);\n',
+    lock: 'LOCK TABLE orders IN EXCLUSIVE MODE;\nEXEC DBMS_SESSION.SLEEP(1.5);\nCOMMIT;\n', lockRe: /lock: X on orders held ~1\.\d\d s \(\d+ poll\(s\)\), over the 0\.5 s budget/,
+    drop: 'ALTER TABLE orders DROP COLUMN note;\n',
+    dump: "CREATE TABLE users (id NUMBER PRIMARY KEY, email VARCHAR2(100) NOT NULL);\nALTER TABLE missing_table ADD (x NUMBER);\nINSERT INTO users VALUES (1, 'a@example.com');\nINSERT INTO users VALUES (2, 'b@example.com');\nCOMMIT;\n",
+    dumpError: /ORA-00942\n/,
+    up: "-- migrate:up\nALTER TABLE users ADD (nickname VARCHAR2(50));\nUPDATE users SET nickname = SUBSTR(email, 1, INSTR(email, '@') - 1);\nCOMMIT;\n-- migrate:down\nALTER TABLE users DROP COLUMN nickname;\n",
+    bad: 'ALTER TABLE no_such_table ADD (x NUMBER);\n', badRe: /ORA-00942/, after: 'ALTER TABLE users ADD (y NUMBER);\n',
+  },
   mssql: {
     seed: join(FIXTURES, 'seed-mssql.sql'), add: 'ALTER TABLE orders ADD due_on date NULL;\n',
     lock: "BEGIN TRANSACTION;\nSELECT 1 FROM orders WITH (TABLOCKX, HOLDLOCK);\nWAITFOR DELAY '00:00:01.5';\nCOMMIT TRANSACTION;\n", lockRe: /lock: X on orders held ~1\.\d\d s \(\d+ poll\(s\)\), over the 0\.5 s budget/,
@@ -334,10 +343,32 @@ for (const engine of ENGINES) {
     const r = cli(['--engine', engine, sc.seed, bad, after]);
     t.after(() => { const n = containerOf(r.out); if (n) remove(n); });
     assert.equal(r.code, 1, r.out + r.err);
-    assert.match(r.out, /FAILED\s+up\s.*0001_bad\.sql: .*no_such_table/i);
+    assert.match(r.out, new RegExp(`FAILED\\s+up\\s.*0001_bad\\.sql: .*${(sc.badRe ?? /no_such_table/i).source}`, 'i'));
     assert.match(r.out, /SKIPPED up\s.*0002_after/);
     assert.ok(!/ran\s+up/.test(r.out));
     assert.ok(!exists(containerOf(r.out)));
+  });
+}
+
+const oraEngine = ENGINES.find((e) => e.startsWith('oracle:'));
+if (oraEngine) {
+  test(`${oraEngine}: SE2 is not emulated and the run says so; ONLINE passes on Free, a PL/SQL block and DDL implicit commits are handled`, { skip, timeout: 2400000 }, (t) => {
+    const dir = scratch(t);
+    const online = put(dir, '0001_idx.sql', 'CREATE INDEX ix_orders_note ON orders (note) ONLINE;\n');
+    const block = put(dir, '0002_block.sql', "BEGIN\n  EXECUTE IMMEDIATE 'ALTER TABLE orders ADD (flag NUMBER)';\nEND;\n/\n");
+    const r = cli(['--engine', oraEngine, SCENARIOS.oracle.seed, online, block]);
+    t.after(() => { const n = containerOf(r.out); if (n) remove(n); });
+    assert.equal(r.code, 0, r.out + r.err);
+    assert.match(r.out, /edition: --edition se2 is not emulated: Oracle Free has the Enterprise Edition features/);
+    assert.match(r.out, /ran\s+up\s.*0001_idx\.sql/);
+    assert.match(r.out, /ran\s+up\s.*0002_block\.sql in \d+ ms\n\s+orders\s+rows 4\s+columns: \+flag/);
+    assert.ok(!exists(containerOf(r.out)));
+    assert.notEqual(spawnSync('docker', ['network', 'inspect', containerOf(r.out)], { stdio: 'ignore', windowsHide: true }).status, 0, 'the private network is removed with the container');
+    const failing = put(dir, '0003_fail.sql', 'ALTER TABLE orders ADD (a NUMBER);\nALTER TABLE no_such ADD (b NUMBER);\n');
+    const f = cli(['--engine', oraEngine, SCENARIOS.oracle.seed, failing]);
+    t.after(() => { const n = containerOf(f.out); if (n) remove(n); });
+    assert.equal(f.code, 1, f.out + f.err);
+    assert.match(f.out, /statements before the failing one stay applied: Oracle DDL commits implicitly/);
   });
 }
 

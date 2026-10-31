@@ -61,15 +61,23 @@ const sweepAbandoned = async (print) => {
   });
   for (const n of dead) await docker(['rm', '-f', '-v', n], { timeoutMs: 120000 });
   if (dead.length) print(`removed ${dead.length} rehearsal container(s) left behind by runs that were killed`);
+  // the internal networks of engines that need an interface (Oracle) are named like their container
+  const nets = await docker(['network', 'ls', '--filter', 'label=msafe-rehearse=1', '--format', '{{.Name}}'], { timeoutMs: 60000 });
+  for (const n of nets.code === 0 ? nets.out.split(/\r?\n/).map((x) => x.trim()) : []) {
+    const pid = Number(n.match(/^msafe-rehearse-(\d+)-/)?.[1]);
+    if (pid && pid !== process.pid && !pidAlive(pid)) await docker(['network', 'rm', n], { timeoutMs: 60000 });
+  }
 };
 
 const live = new Set();
+const liveNets = new Set();
 let hooked = false;
 const removeSync = (name) => spawnSync('docker', ['rm', '-f', '-v', name], { stdio: 'ignore', windowsHide: true });
+const removeNetSync = (name) => spawnSync('docker', ['network', 'rm', name], { stdio: 'ignore', windowsHide: true });
 const hookExit = () => {
   if (hooked) return;
   hooked = true;
-  const cleanUp = () => { for (const n of live) removeSync(n); live.clear(); };
+  const cleanUp = () => { for (const n of live) removeSync(n); live.clear(); for (const n of liveNets) removeNetSync(n); liveNets.clear(); };
   process.on('exit', cleanUp);
   for (const [sig, code] of Object.entries(SIGNAL_EXIT)) process.on(sig, () => { cleanUp(); process.exit(code); });
 };
@@ -179,7 +187,7 @@ const snapshotOf = async (eng, c) => {
     const s = stats.get(key) ?? { n: 0 };
     snap.set(key, {
       rows: Number(s.n),
-      columns: new Map(t.cols.map((col, i) => [col.name, {
+      columns: new Map(t.cols.map((col, i) => [eng.fold ? eng.fold(col.name) : col.name, {
         type: col.type, notnull: false, nonNull: Number(s[`c${i}`] ?? 0),
         fingerprint: [s[`d${i}`], s[`l${i}`], s[`lo${i}`], s[`hi${i}`]].join('|'),
       }])),
@@ -230,10 +238,13 @@ const loadSeed = async (eng, name, file, dump, print) => {
   else {
     r = await docker(args, { input: decodeSql(gz ? gunzipSync(readFileSync(file)) : readFileSync(file)) });
   }
-  if (!dump && r.code !== 0) throw new RehearsalUsageError(`the seed ${file} did not load: ${firstLines(r.err || r.out, 3)}`);
-  const errors = eng.errorLines(r.err);
+  if (!dump && r.code !== 0) throw new RehearsalUsageError(`the seed ${file} did not load: ${failText(eng, r)}`);
+  const errors = eng.errorLines(eng.errorsOnStdout ? `${r.err}\n${r.out}` : r.err);
   if (dump && errors.length) print(`seed: the dump loaded with ${errors.length} error line(s), first ${eng.describeError(errors[0])}`);
 };
+
+// Why a client run failed: the engine knows where its client writes errors.
+const failText = (eng, r) => (eng.failText ? eng.failText(r) : firstLines(r.err || r.out, 3));
 
 const statementCount = (file, kind, dialect) => parse(partFor(file, kind, dialect).sql, { dialect }).statements.length;
 
@@ -271,7 +282,14 @@ export const rehearseDocker = async (opts, print) => {
     // Data lives in memory (much faster to initialise and load) unless the seed is too big for that or --disk is given.
     // No network: the database is reached with docker exec only, so a --keep'd copy of production data is not reachable from other containers.
     const tmpfs = opts.disk !== true && seedBytes(source) <= TMPFS_SEED_LIMIT;
-    const started = await docker(['run', '-d', '--name', name, '--label', 'msafe-rehearse=1', '--network', 'none', ...eng.runArgs({ tmpfs })], { timeoutMs: 120000 });
+    // Oracle's instance fails (ORA-00600 ksipc) without a non-loopback interface: it gets a private network with no
+    // outside access that nothing else is attached to, which keeps the data as unreachable as --network none does.
+    if (eng.needsNetwork) {
+      const net = await docker(['network', 'create', '--internal', '--label', 'msafe-rehearse=1', name], { timeoutMs: 60000 });
+      if (net.code !== 0) throw new RehearsalUsageError(`could not create the private network for ${spec.image}: ${firstLines(net.err, 2)}`);
+      liveNets.add(name);
+    }
+    const started = await docker(['run', '-d', '--name', name, '--label', 'msafe-rehearse=1', '--network', eng.needsNetwork ? name : 'none', ...eng.runArgs({ tmpfs })], { timeoutMs: 120000 });
     if (started.code !== 0) throw new RehearsalUsageError(`could not start ${spec.image}: ${firstLines(started.err, 2)}`);
     print(`runner: ${profile.label} (${detected.evidence}) · engine ${spec.image} in container ${name}`);
     await waitReady(eng, name, opts.startupTimeoutMs ?? eng.startupMs ?? 240000);
@@ -320,7 +338,7 @@ export const rehearseDocker = async (opts, print) => {
       const b = performance.now();
       if (r.code !== 0) {
         failed++;
-        print(`FAILED  ${kind.padEnd(4)} ${file}: ${firstLines(r.err || r.out, 3)}`);
+        print(`FAILED  ${kind.padEnd(4)} ${file}: ${failText(eng, r)}`);
         if (eng.implicitCommit && !wrap) print(`          statements before the failing one stay applied: ${eng.label} DDL commits implicitly`);
         return false;
       }
@@ -372,10 +390,12 @@ export const rehearseDocker = async (opts, print) => {
     poller?.stop();
     if (opts.keep && finished) {
       live.delete(name);
-      print(`container ${name} kept for inspection (password ${eng.password}, no network: use docker exec).\n  connect: ${eng.shell(name)}\n  remove:  docker rm -f -v ${name}`);
+      liveNets.delete(name);
+      print(`container ${name} kept for inspection (password ${eng.password}, no network: use docker exec).\n  connect: ${eng.shell(name)}\n  remove:  docker rm -f -v ${name}${eng.needsNetwork ? ` && docker network rm ${name}` : ''}`);
     } else {
       await docker(['rm', '-f', '-v', name], { timeoutMs: 120000 }).catch(() => {});
       live.delete(name);
+      if (liveNets.has(name)) { await docker(['network', 'rm', name], { timeoutMs: 60000 }).catch(() => {}); liveNets.delete(name); }
       if (opts.keep) print(`the run did not finish, so container ${name} was removed`);
     }
   }
