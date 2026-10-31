@@ -5,8 +5,10 @@ data, break the code already running, or lock a busy table.
 
 - `migration-lint`: static checks over SQL migrations (PostgreSQL, SQLite, MySQL), plus git history checks
   for applied migrations that were edited, renamed, deleted, out of order or duplicated.
-- `rehearse-sqlite`: applies migrations to a copy of a SQLite database and reports rows and columns per
-  table, lost values and new foreign-key orphans.
+- `rehearse`: applies migrations to a copy of a SQLite database, or to a throwaway PostgreSQL, MySQL or
+  MariaDB Docker container seeded from a `.sql` file or a dump, and reports rows and columns per table, lost
+  values, duration and the write-blocking locks each migration held (`rehearse-sqlite` is the same command
+  with SQLite as the only engine).
 - The skill tells the agent when to run them and how to fix each finding (expand, migrate, contract).
 
 Zero runtime dependencies. Node 22.13 or newer.
@@ -21,7 +23,7 @@ claude plugin install migrations-safe@migrations-safe
 Pin a release by adding the tag to the marketplace source, and update when you choose to:
 
 ```bash
-claude plugin marketplace add NahuelMosse/migrations-safe#v1.0.0
+claude plugin marketplace add NahuelMosse/migrations-safe#v1.1.0
 claude plugin marketplace update migrations-safe
 claude plugin update migrations-safe@migrations-safe
 ```
@@ -32,11 +34,14 @@ claude plugin update migrations-safe@migrations-safe
 node skills/migrations-safe/scripts/migration-lint.mjs db/migrations/            # lint files or folders
 node skills/migrations-safe/scripts/migration-lint.mjs --history                 # new migrations in this branch + git checks
 python manage.py sqlmigrate shop 0042 | node skills/migrations-safe/scripts/migration-lint.mjs - --runner django
-node skills/migrations-safe/scripts/rehearse-sqlite.mjs app.db db/migrations/0007_due.sql
+node skills/migrations-safe/scripts/rehearse.mjs app.db db/migrations/0007_due.sql
+node skills/migrations-safe/scripts/rehearse.mjs --engine postgres:16 seed.sql db/migrations/0007_due.sql --down
+node skills/migrations-safe/scripts/rehearse.mjs --engine mysql:8.4 --dump prod-subset.sql.gz 0007.sql --lock-budget 1s
 ```
 
-Options: `--runner`, `--dialect`, `--fail-on warning|error|<rule>,...`, `--format text|json|sarif|github`,
-`--base`, `--repo`, `--schema`; `--help` lists them. Exit codes: 0 nothing at the failure level, 1 findings,
+Lint options: `--runner`, `--dialect`, `--mysql-version`, `--fail-on warning|error|<rule>,...`,
+`--format text|json|sarif|github`, `--base`, `--repo`, `--schema`; `--help` lists them. Rehearsal options:
+`--engine`, `--dump`, `--down`, `--runner`, `--lock-budget`, `--keep`, `--disk`, `--allow-loss`. Exit codes: 0 nothing at the failure level, 1 findings,
 2 could not run (never a pass: 0 files linted, a shallow clone, bad arguments, a crash).
 
 ## Support matrix
@@ -55,9 +60,17 @@ Options: `--runner`, `--dialect`, `--fail-on warning|error|<rule>,...`, `--forma
 | Rails | `config/application.rb`, `db/migrate/*.rb` | yes | yes | lenient |
 | plain SQL | nothing | yes | no | strict |
 
-Alembic, Django, Knex and Rails generate SQL at run time: pipe it in with `-`. Dialects: PostgreSQL (all rules),
-MySQL (`ALGORITHM`, type changes, renames and the generic rules), SQLite (generic rules, table rebuild checks,
-rehearsal). The linter is regex-based; for PostgreSQL also run `squawk`.
+Alembic, Django, Knex and Rails generate SQL at run time: pipe it in with `-`.
+
+| Dialect | Lint | Rehearsal |
+|---|---|---|
+| PostgreSQL | all rules (locks, `CONCURRENTLY`, `NOT VALID`, defaults, transactions) | Docker `--engine postgres:<tag>`: duration, `pg_locks`, row and column diff, up-down-up |
+| MySQL 5.7, 8.0, 8.4 | `mysql-*` rules per server version (`--mysql-version`): `ALGORITHM` support, metadata-lock timeout, foreign keys, FULLTEXT/SPATIAL, primary keys, charset, ENUM, rebuilds, instant row versions; gh-ost / pt-online-schema-change advice | Docker `--engine mysql:<tag>`: duration, `performance_schema.metadata_locks`, diff, up-down-up |
+| MariaDB 10.3+ | same rules with MariaDB's instant-DDL versions (`--mysql-version mariadb-10.6`) | Docker `--engine mariadb:<tag>`: metadata locks through the `metadata_lock_info` plugin |
+| SQLite | generic rules, table rebuild checks | bundled `node:sqlite`, no Docker |
+
+The linter is regex-based; for PostgreSQL also run `squawk`. Server-engine rehearsals need the `docker` CLI and
+reach the database only through `docker exec`; the container is always removed.
 
 ## CI
 
@@ -77,7 +90,7 @@ jobs:
         with:
           node-version: '24'
       - run: |
-          git clone --depth 1 --branch v1.0.0 https://github.com/NahuelMosse/migrations-safe.git "$RUNNER_TEMP/ms"
+          git clone --depth 1 --branch v1.1.0 https://github.com/NahuelMosse/migrations-safe.git "$RUNNER_TEMP/ms"
           node "$RUNNER_TEMP/ms/skills/migrations-safe/scripts/migration-lint.mjs" --history --base origin/${{ github.base_ref }} --format github
 ```
 
@@ -88,12 +101,31 @@ the push (`fetch-depth: 0` keeps it available):
       - run: node "$RUNNER_TEMP/ms/skills/migrations-safe/scripts/migration-lint.mjs" --history --base ${{ github.event.before }} --format github
 ```
 
+A rehearsal job on a Linux runner (Docker is installed) with the engine pinned to production's version:
+
+```yaml
+  rehearse:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: |
+          git clone --depth 1 --branch v1.1.0 https://github.com/NahuelMosse/migrations-safe.git "$RUNNER_TEMP/ms"
+          node "$RUNNER_TEMP/ms/skills/migrations-safe/scripts/rehearse.mjs" --engine postgres:16 db/seed.sql db/migrations/*.up.sql --down
+```
+
 ## Development
 
 ```bash
 npm test
 node skills/migrations-safe/scripts/migration-lint.mjs skills/migrations-safe/fixtures/good --strict
 ```
+
+The Docker rehearsal tests start containers (`postgres:16`, `mysql:8.4` by default; `MSAFE_DOCKER_ENGINES=postgres:17,mariadb:11`
+changes them). Without Docker they are reported as `skipped: docker not available`; `MSAFE_REQUIRE_DOCKER=1` turns
+that into a failure and `MSAFE_DOCKER_TESTS=0` skips them on purpose.
 
 Trigger evals live in `evals/` (run them with `claude plugin eval . --scaffold --allow-tools Bash`: four cases
 seed their workspace with a `fixture.sh`, and every case lists `Skill` in `allowed_tools` so the skill can fire).

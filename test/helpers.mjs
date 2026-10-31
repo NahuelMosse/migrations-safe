@@ -10,7 +10,8 @@ export const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 export const SKILL = join(ROOT, 'skills', 'migrations-safe');
 export const LINT = join(SKILL, 'scripts', 'migration-lint.mjs');
 export const REHEARSE = join(SKILL, 'scripts', 'rehearse-sqlite.mjs');
-export const FIXTURES = join(SKILL, 'fixtures');
+export const REHEARSE_ANY = join(SKILL, 'scripts', 'rehearse.mjs');
+export const FIXTURES =join(SKILL, 'fixtures');
 
 // Rule ids found in `sql`, sorted; ctx as for lintSql, with `runner` as a shortcut for a profile.
 export const ids = (sql, ctx = {}) => lintSql(sql, { ...ctx, profile: ctx.runner ? profileOf(ctx.runner) : ctx.profile }).findings.map((f) => f.rule).sort();

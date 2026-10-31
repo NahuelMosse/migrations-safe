@@ -2,7 +2,7 @@
 import { RehearsalUsageError, rehearse } from './rehearse.mjs';
 import { DEFAULT_LOCK_BUDGET_MS, parseDuration, parseEngine, rehearseDocker } from './rehearse-docker.mjs';
 
-export const USAGE = `usage: rehearse.mjs [--engine <engine>] <database.sqlite | seed.sql> <migration.sql>... [--down [<down.sql>...]] [options]
+export const usage = (name) => `usage: ${name} [--engine <engine>] <database.sqlite | seed.sql> <migration.sql>... [--down [<down.sql>...]] [options]
 
   --engine <engine>   sqlite (default) | postgres:<tag> | mysql:<tag> | mariadb:<tag>, for example postgres:16
                       or mysql:8.4. A server engine runs a throwaway Docker container (name msafe-rehearse-*)
@@ -56,10 +56,10 @@ const parseArgs = (argv) => {
   return opts;
 };
 
-export const runRehearseCli = async (argv, { out = (s) => console.log(s), err = (s) => console.error(s) } = {}) => {
+export const runRehearseCli = async (argv, { out = (s) => console.log(s), err = (s) => console.error(s), name = 'rehearse.mjs' } = {}) => {
   try {
     const opts = parseArgs(argv);
-    if (opts.help) { out(USAGE); return 0; }
+    if (opts.help) { out(usage(name)); return 0; }
     if (opts.engine === 'sqlite') {
       for (const [flag, used] of [['--dump', opts.dump], ['--keep', opts.keep], ['--lock-budget', opts.lockBudgetMs !== null], ['--disk', opts.disk === true]])
         if (used) throw new RehearsalUsageError(`${flag} needs a server engine: --engine postgres:<tag>, mysql:<tag> or mariadb:<tag>`);

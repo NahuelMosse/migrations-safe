@@ -28,7 +28,8 @@ python manage.py sqlmigrate shop 0042 | node "${CLAUDE_SKILL_DIR}/scripts/migrat
 The same commands work in PowerShell: `${CLAUDE_SKILL_DIR}` is replaced with the skill's path before the
 shell sees the command, so it is not an environment variable.
 
-- Needs Node 22.13+. No database needed; reads `.sql` files or SQL on stdin (`-`).
+- Needs Node 22.13+. No database needed; reads `.sql` files or SQL on stdin (`-`). The rehearsal in step 4
+  needs the `docker` CLI for PostgreSQL, MySQL and MariaDB.
 - The runner (Prisma, Drizzle, Flyway, Liquibase, goose, dbmate, golang-migrate, Atlas, Alembic, Django,
   Knex, Rails, or plain SQL) and the dialect (PostgreSQL, SQLite, MySQL) are detected from the project; override
   with `--runner` and `--dialect`. Details per runner, and how to feed Alembic, Django, Knex and Rails:
@@ -103,18 +104,24 @@ drop, rename). The linter checks the rebuild against the table as earlier migrat
 
 ### 4. Rehearse on a copy with realistic data
 
-An empty test database proves almost nothing. For SQLite:
+An empty test database proves almost nothing. SQLite is rehearsed on a copy of the file; PostgreSQL, MySQL
+and MariaDB on a throwaway Docker container of the same engine and version as production:
 
 ```bash
-node "${CLAUDE_SKILL_DIR}/scripts/rehearse-sqlite.mjs" app.db db/migrations/0007_due.sql
-node "${CLAUDE_SKILL_DIR}/scripts/rehearse-sqlite.mjs" seed.sql 0007.up.sql --down 0007.down.sql   # up, down, up
+node "${CLAUDE_SKILL_DIR}/scripts/rehearse.mjs" app.db db/migrations/0007_due.sql
+node "${CLAUDE_SKILL_DIR}/scripts/rehearse.mjs" seed.sql 0007.up.sql --down 0007.down.sql        # up, down, up
+node "${CLAUDE_SKILL_DIR}/scripts/rehearse.mjs" --engine postgres:16 seed.sql db/migrations/0007_due.sql --down
+node "${CLAUDE_SKILL_DIR}/scripts/rehearse.mjs" --engine mysql:8.4 --dump prod-subset.sql.gz 0007.sql --lock-budget 1s
 ```
 
-It works on a copy and reports, per table, rows and columns added, dropped or emptied; it fails on lost
-rows or values, new foreign-key orphans and migrations that do not run, and it emulates the runner's
-transaction wrapping and `foreign_keys` setting. For PostgreSQL and MySQL the rehearsal is a restored
-copy on the same engine and version: [references/rehearsal.md](references/rehearsal.md) has the steps and
-how to read the SQLite output. Load it before rehearsing.
+Every run applies the migrations in order the way the runner does (transaction wrapping, down sections) and
+reports, per table, rows and columns added, dropped or emptied. It fails on lost rows or values and on
+migrations that do not run; SQLite also on new foreign-key orphans. With `--engine` it also reports each
+migration's duration and the write-blocking locks it held (PostgreSQL `pg_locks`, MySQL and MariaDB metadata
+locks, polled from a second session), and fails when one is held longer than `--lock-budget` (default 2s).
+The container is always removed (also on failure and Ctrl+C); `--keep` leaves it and prints how to remove it.
+Exit 2 means docker is missing or cannot pull the image, never a pass. How to seed, read the output and what
+the lock numbers mean: [references/rehearsal.md](references/rehearsal.md). Load it before rehearsing.
 
 ### 5. Verify and report
 
@@ -122,8 +129,8 @@ Finish when the linter shows **0 errors, or each remaining finding is allowed in
 reason**. Do not loop on warnings by editing around them, and do not add an `allow` to get green.
 
 - Linter exit code and last line per run; every `allow` with its reason.
-- Rehearsal: where (engine, version, data size), duration, rows and columns before and after, the N-1
-  code's test suite against the migrated schema.
+- Rehearsal: where (engine, version, data size), duration, longest lock, rows and columns before and after,
+  the N-1 code's test suite against the migrated schema.
 - The release plan when the change has several steps: which deploy carries which migration.
 - What could not run, said as such ("rehearsal could not run: no copy of production available").
 
