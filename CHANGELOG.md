@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.2.1
+
+Published as the `migrations-safe` npm package; GitHub Action.
+
+- `npm i -D migrations-safe` installs `migration-lint`, `rehearse` and `rehearse-sqlite`; the CLI stays inside
+  `skills/migrations-safe/`, so the skill directory copied alone still works. Releases are published from a tag
+  with provenance.
+- `uses: NahuelMosse/migrations-safe@v1.2.1` runs `migration-lint` in any repository without Node tooling
+  (inputs `args`, `node-version`); the default is the history check against the pull request's base.
+- Test fixtures and seeds live in `test/fixtures/` and are not part of the package.
+
 ## 1.2.0
 
 SQL Server, Oracle and Db2 LUW at the depth MySQL got in 1.1.

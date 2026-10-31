@@ -1,19 +1,37 @@
 {
   "name": "migrations-safe",
-  "version": "1.2.0",
-  "private": true,
-  "type": "module",
+  "version": "1.2.1",
   "description": "Linter, git history checks and SQLite, PostgreSQL, MySQL, MariaDB, SQL Server, Oracle and Db2 rehearsal for database migrations; also a Claude Code plugin.",
+  "keywords": ["migrations", "database", "sql", "lint", "postgresql", "mysql", "mariadb", "sqlite", "sql-server", "oracle", "db2", "flyway", "prisma", "cli"],
   "license": "MIT",
   "author": "Nahuel Mosse",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/NahuelMosse/migrations-safe.git"
+  },
+  "homepage": "https://github.com/NahuelMosse/migrations-safe#readme",
+  "bugs": {
+    "url": "https://github.com/NahuelMosse/migrations-safe/issues"
+  },
+  "type": "module",
   "bin": {
     "migration-lint": "skills/migrations-safe/scripts/migration-lint.mjs",
     "rehearse": "skills/migrations-safe/scripts/rehearse.mjs",
     "rehearse-sqlite": "skills/migrations-safe/scripts/rehearse-sqlite.mjs"
   },
+  "files": [
+    "skills/migrations-safe",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
   "engines": { "node": ">=22.13" },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
   "scripts": {
     "test": "node --test \"test/*.test.mjs\"",
-    "fixtures": "node skills/migrations-safe/scripts/migration-lint.mjs skills/migrations-safe/fixtures/good --strict"
+    "fixtures": "node skills/migrations-safe/scripts/migration-lint.mjs test/fixtures/good --strict"
   }
 }
