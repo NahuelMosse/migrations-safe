@@ -163,12 +163,6 @@ jobs:
           node-version: '24'
       - name: Pull the engine
         run: docker pull icr.io/db2_community/db2:11.5.9.0
-      - name: Rehearse the seed on Db2
-        run: |
-          S=skills/migrations-safe
-          printf 'ALTER TABLE orders ADD COLUMN due_on DATE;\n' > /tmp/db2-add.sql
-          printf "ALTER TABLE orders DROP COLUMN note;\nCALL SYSPROC.ADMIN_CMD('REORG TABLE orders');\n" > /tmp/db2-drop.sql
-          node $S/scripts/rehearse.mjs --engine db2:11.5.9.0 --allow-loss orders.note $S/fixtures/seed-db2.sql /tmp/db2-add.sql /tmp/db2-drop.sql
       - name: Db2 rehearsal tests
         run: node --test test/rehearse-docker.test.mjs
       - name: No rehearsal container or network is left behind

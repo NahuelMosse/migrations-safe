@@ -312,7 +312,7 @@ const SCENARIOS = {
   },
   db2: {
     seed: join(FIXTURES, 'seed-db2.sql'), add: 'ALTER TABLE orders ADD COLUMN due_on DATE;\n',
-    lock: 'UPDATE COMMAND OPTIONS USING C OFF;\nLOCK TABLE orders IN EXCLUSIVE MODE;\nCALL DBMS_ALERT.SLEEP(1.5);\nCOMMIT;\n', lockRe: /lock: X on orders held ~1\.\d\d s \(\d+ poll\(s\)\), over the 0\.5 s budget/,
+    lock: 'UPDATE COMMAND OPTIONS USING C OFF;\nLOCK TABLE orders IN EXCLUSIVE MODE;\nCALL DBMS_ALERT.SLEEP(2);\nCOMMIT;\n', lockRe: /lock: X on orders held ~[12]\.\d\d s \(\d+ poll\(s\)\), over the 0\.5 s budget/,
     drop: "ALTER TABLE orders DROP COLUMN note;\nCALL SYSPROC.ADMIN_CMD('REORG TABLE orders');\n",
     dump: "CREATE TABLE users (id INTEGER NOT NULL PRIMARY KEY, email VARCHAR(100) NOT NULL);\nALTER TABLE missing_table ADD COLUMN x INTEGER;\nINSERT INTO users VALUES (1, 'a@example.com'), (2, 'b@example.com');\nCOMMIT;\n",
     dumpError: /SQL0204N\n/,

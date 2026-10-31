@@ -60,10 +60,11 @@ export const makeDb2 = ({ kind, image }) => {
     pollInput: () => `${POLL}\nVALUES ${AT} || 'END'${T}\n`,
     // the CLP writes SQL errors to stdout
     errorsOnStdout: true,
-    errorLines: (text) => text.split(/\r?\n/).filter((l) => /^(?:SQL|DB2)\d+[NE]\b/.test(l)),
+    // DB21034E only announces the SQL error that follows it (the statement was sent as SQL): it is not an error of its own
+    errorLines: (text) => text.split(/\r?\n/).filter((l) => /^(?:SQL|DB2)\d+[NE]\b/.test(l) && !l.startsWith('DB21034E')),
     describeError: (line) => line.match(/^(?:SQL|DB2)\d+[NE]/)?.[0] ?? 'SQL',
     failText: (r) => {
-      const lines = `${r.out}\n${r.err}`.split(/\r?\n/).filter((l) => /^(?:SQL|DB2)\d+[NE]\b/.test(l)).map((l) => l.replace(/\s+/g, ' '));
+      const lines = eng.errorLines(`${r.out}\n${r.err}`).map((l) => l.replace(/\s+/g, ' '));
       return lines.length ? lines.slice(0, 3).join(' | ') : (r.err || r.out).trim().split(/\r?\n/).slice(0, 3).join(' | ');
     },
     metaSql: `SELECT c.TABSCHEMA || CHR(9) || c.TABNAME || CHR(9) || c.COLNAME || CHR(9) || c.TYPENAME || CASE WHEN c.TYPENAME IN ('VARCHAR', 'CHARACTER', 'VARGRAPHIC', 'GRAPHIC', 'VARBINARY', 'BINARY') THEN '(' || TRIM(CHAR(c.LENGTH)) || ')' WHEN c.TYPENAME = 'DECIMAL' THEN '(' || TRIM(CHAR(c.LENGTH)) || ',' || TRIM(CHAR(c.SCALE)) || ')' ELSE '' END FROM SYSCAT.COLUMNS c JOIN SYSCAT.TABLES t ON t.TABSCHEMA = c.TABSCHEMA AND t.TABNAME = c.TABNAME WHERE t.TYPE = 'T' AND t.TABSCHEMA = '${OWNER}' AND t.TABNAME NOT LIKE 'MSAFE\\_%' ESCAPE '\\' ORDER BY c.TABNAME, c.COLNO${T}`,
