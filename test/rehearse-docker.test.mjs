@@ -4,7 +4,7 @@ import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { gzipSync } from 'node:zlib';
-import { OWNER, SIGNAL_EXIT, locksIn, makeEngine, mysqlInput, parseDuration, parseEngine, seedBytes } from '../skills/migrations-safe/scripts/lib/rehearse-docker.mjs';
+import { OWNER, SIGNAL_EXIT, bootIdOf, locksIn, makeEngine, mysqlInput, ownerOf, parseDuration, parseEngine, seedBytes } from '../skills/migrations-safe/scripts/lib/rehearse-docker.mjs';
 import { FIXTURES, REHEARSE_ANY, put, scratch } from './helpers.mjs';
 
 // ── unit tests: no docker needed ─────────────────────────────────────────────────────────────────
@@ -126,11 +126,25 @@ test('locks of one table are merged across modes, and only tables that existed a
   assert.equal(held[0].ms, 100 + 50);
 });
 
-test('the owner of a container names the system: hostname, platform and, under WSL, the distro', () => {
+test('the owner of a container names the system: hostname, platform, under WSL the distro, and the boot', () => {
   const parts = OWNER.split('/');
   assert.ok(parts.length >= 2);
   assert.equal(parts[1], process.platform);
-  assert.equal(parts[2], process.env.WSL_DISTRO_NAME);
+  const distro = process.env.WSL_DISTRO_NAME ? 1 : 0;
+  assert.equal(parts[2] && !parts[2].startsWith('boot-') ? parts[2] : undefined, process.env.WSL_DISTRO_NAME);
+  assert.equal(parts.length, 2 + distro + (parts.at(-1).startsWith('boot-') ? 1 : 0));
+  assert.equal(ownerOf('h', 'linux', 'Ubuntu', 'abc'), 'h/linux/Ubuntu/boot-abc');
+  assert.equal(ownerOf('h', 'linux', undefined, ''), 'h/linux');
+});
+
+test('the boot id comes from the cheapest source of each platform and falls back to nothing', () => {
+  assert.equal(bootIdOf('linux', { readText: (p) => (p === '/proc/sys/kernel/random/boot_id' ? '2b6c-11ee\n' : '') }), '2b6c-11ee');
+  assert.equal(bootIdOf('darwin', { run: (cmd, args) => (cmd === 'sysctl' && args.join(' ') === '-n kern.boottime' ? '{ sec = 1767225600, usec = 250 } Thu Jan  1 00:00:00 2026\n' : '') }), '1767225600');
+  assert.equal(bootIdOf('win32', { run: () => '20260101000000\r\n' }), '20260101000000');
+  assert.equal(bootIdOf('win32', { run: () => 'garbage' }), '');
+  assert.equal(bootIdOf('linux', { readText: () => { throw new Error('no /proc'); } }), '');
+  assert.equal(bootIdOf('freebsd', {}), '');
+  assert.ok(bootIdOf(process.platform) !== undefined);
 });
 
 test('signal exit codes follow the shell convention', () => {
@@ -188,6 +202,10 @@ test('Oracle and Db2 scripts are rebuilt from their statements for the client', 
   assert.match(ora.pollInput(), /v\$lock[^]*dba_ddl_locks[^]*@@END/);
   assert.equal(ora.describeError('ORA-00942: table or view does not exist'), 'ORA-00942');
   assert.match(ora.editionNote, /not emulated/);
+  const noSlash = ora.scriptInput('ALTER TABLE t ADD (c NUMBER);\nBEGIN\n  NULL;\nEND;\n', { wrap: false, marks: true });
+  assert.equal(noSlash.input, '', 'a script that would hang SQL*Plus is not sent');
+  assert.match(noSlash.error, /without its closing `\/`.*line 2.*oracle-missing-slash.*not run/);
+  assert.equal(ora.scriptInput('BEGIN\n  NULL;\nEND;\n/\nALTER TABLE t ADD (d NUMBER);\n', { marks: false }).error, undefined);
   const db2 = makeEngine({ kind: 'db2', tag: '11.5.9.0', image: 'x' }, {});
   const d = db2.scriptInput("--#SET TERMINATOR @\nCREATE TRIGGER x AFTER INSERT ON t FOR EACH ROW BEGIN ATOMIC SELECT 1 FROM sysibm.sysdummy1; END@\nALTER TABLE t ADD COLUMN c INTEGER@\n", { wrap: true, marks: true });
   assert.match(d.input, /^UPDATE COMMAND OPTIONS USING C OFF~\nVALUES CHR\(64\)/);
@@ -271,7 +289,7 @@ const DB2_NOTE = 'the Db2 rehearsal needs a privileged x86_64 Docker daemon and 
 const db2Skip = skip ? `${skip}; ${DB2_NOTE}` : process.arch === 'x64' ? false : `skipped: ${DB2_NOTE} (this machine is ${process.arch}, so nothing was rehearsed)`;
 const ENGINES = (process.env.MSAFE_DOCKER_ENGINES ?? 'postgres:16,mysql:8.4').split(',').map((s) => s.trim()).filter(Boolean);
 
-test('docker is available when the run requires it', { skip: !required || disabled }, () => {
+test('docker is available when the run requires it', { skip: disabled ? `skipped: docker tests disabled (MSAFE_DOCKER_TESTS=0); ${COVERED}` : required ? false : 'skipped: this guard only applies when MSAFE_REQUIRE_DOCKER=1 (the CI docker jobs); without it a missing docker is reported by the skip reasons of the tests below, and the engines are covered by the unit tests and CI jobs they name' }, () => {
   assert.ok(available, 'MSAFE_REQUIRE_DOCKER=1 but docker is not available');
 });
 
@@ -563,7 +581,8 @@ if (pgEngine) {
     const abandoned = { name: `msafe-rehearse-${deadPid}-aaaaaa`, owner: OWNER };
     const running = { name: `msafe-rehearse-${process.pid}-bbbbbb`, owner: OWNER };
     const elsewhere = { name: `msafe-rehearse-${deadPid}-cccccc`, owner: `${OWNER}/another-system` };
-    for (const { name: n, owner } of [abandoned, running, elsewhere]) {
+    const otherBoot = { name: `msafe-rehearse-${deadPid}-dddddd`, owner: `${OWNER.replace(/\/boot-[^/]*$/, '')}/boot-another-boot` };
+    for (const { name: n, owner } of [abandoned, running, elsewhere, otherBoot]) {
       const r = spawnSync('docker', ['run', '-d', '--label', 'msafe-rehearse=1', '--label', `msafe-owner=${owner}`, '--name', n, '--network', 'none', 'alpine:latest', 'sleep', '600'], { encoding: 'utf8', windowsHide: true });
       assert.equal(r.status, 0, r.stderr);
       t.after(() => remove(n));
@@ -575,6 +594,7 @@ if (pgEngine) {
     assert.ok(!exists(abandoned.name), 'the abandoned container is removed');
     assert.ok(exists(running.name), 'a container whose process is alive is left alone');
     assert.ok(exists(elsewhere.name), 'a container started from another system sharing the daemon is left alone');
+    assert.ok(exists(otherBoot.name), 'a container from another boot of a system with the same hostname is left alone');
   });
 }
 

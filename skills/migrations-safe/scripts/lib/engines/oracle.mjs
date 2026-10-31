@@ -23,6 +23,10 @@ const lit = (s) => `'${s.replaceAll("'", "''")}'`;
 export const sqlplusInput = (sql) => parse(sql, { dialect: 'oracle' }).statements.filter((s) => !s.inner)
   .map((s) => (s.command ? s.text : s.plsql ? `${s.text}\n/` : `${s.text};`)).join('\n');
 
+// Lines where a PL/SQL block ends without its `/`. SQL*Plus would keep reading past the block (and wait for
+// input), so the script is not run as if it were valid: the lint rule oracle-missing-slash reports the same.
+export const missingSlashLines = (sql) => parse(sql, { dialect: 'oracle' }).statements.filter((s) => !s.inner && s.plsql && s.slash === false).map((s) => s.line);
+
 export const makeOracle = ({ kind, image }, { edition = 'se2' } = {}) => {
   // prologue: output settings for machine reading, the session tag, and (for strict runs) stop at the first error
   const prologue = (app, stopOnError) => [
@@ -43,7 +47,11 @@ export const makeOracle = ({ kind, image }, { edition = 'se2' } = {}) => {
 SELECT 1 FROM dual;" | sqlplus -S -L ${CONNECT(APP_USER)}`],
     setup: async () => null,
     scriptArgs: (c, { app, stopOnError }) => sqlplus(c, { app, stopOnError }),
-    scriptInput: (sql, { marks }) => ({ input: `${marks ? EPOCH('T0') : ''}${sqlplusInput(sql)}\n${marks ? EPOCH('T1') : ''}`, marked: marks }),
+    scriptInput: (sql, { marks }) => {
+      const lines = missingSlashLines(sql);
+      if (lines.length) return { input: '', marked: false, error: `PL/SQL block without its closing \`/\` on a line of its own (line ${lines.join(', ')}): SQL*Plus and Flyway keep reading past it and the migration would hang or run the following statements as part of the block — add the \`/\` (lint rule oracle-missing-slash); not run` };
+      return { input: `${marks ? EPOCH('T0') : ''}${sqlplusInput(sql)}\n${marks ? EPOCH('T1') : ''}`, marked: marks };
+    },
     queryArgs: (c) => sqlplus(c, { app: SEED_APP }),
     pollerArgs: (c) => sqlplus(c, { user: 'SYSTEM', app: POLLER_APP, stopOnError: false }),
     pollInput: () => `${POLL_TABLES}\nSELECT '@@END' FROM dual;\n`,

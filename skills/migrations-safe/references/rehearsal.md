@@ -65,7 +65,7 @@ node "${CLAUDE_SKILL_DIR}/scripts/rehearse.mjs" --engine mariadb:11 seed.sql 000
 
 Needs only the `docker` CLI: the database is reached with `docker exec <container> psql|mysql`, no port is
 published, and nothing but the standard images is used. The container is named `msafe-rehearse-<pid>-<id>`,
-started fresh with no network, and removed at the end, also when a migration fails, the run errors, or it gets
+started fresh with no network (Oracle and Db2: a private `--internal` network, see above), and removed at the end, also when a migration fails, the run errors, or it gets
 Ctrl+C or SIGTERM (exit 130 and 143). A hard kill (TerminateProcess, `Stop-Process`, a CI cancel, an IDE stop)
 cannot be caught and leaves the container; every start removes the `msafe-rehearse-*` containers (and private
 networks) started on the same system whose process is gone. The system is the label `msafe-owner`

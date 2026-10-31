@@ -52,8 +52,19 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // up (TerminateProcess, a CI cancel) leaves its container; the next run removes the ones whose pid is gone.
 // A pid only means something on the system that started the run, and one docker daemon can serve several
 // (Windows and its WSL distros share Docker Desktop and the hostname): each container and network is labelled
-// with its owner, and a run sweeps only its own system's.
-export const OWNER = [hostname(), process.platform, process.env.WSL_DISTRO_NAME].filter(Boolean).join('/');
+// with its owner, and a run sweeps only its own system's. The owner ends with an id of the current boot of the
+// kernel: two systems that still share hostname and platform (a WSL distro without WSL_DISTRO_NAME, containers on
+// the host network) do not share a boot, and a pid from before a reboot is never taken for a live one.
+export const bootIdOf = (platform, { readText = (p) => readFileSync(p, 'utf8'), run = (cmd, args) => spawnSync(cmd, args, { encoding: 'utf8', timeout: 5000, windowsHide: true }).stdout } = {}) => {
+  try {
+    if (platform === 'linux') return readText('/proc/sys/kernel/random/boot_id').trim();
+    if (platform === 'darwin') return String(run('sysctl', ['-n', 'kern.boottime'])).match(/sec\s*=\s*(\d+)/)?.[1] ?? '';
+    if (platform === 'win32') return String(run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', '(Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToUniversalTime().ToString(\'yyyyMMddHHmmss\')'])).trim().match(/^\d{14}$/)?.[0] ?? '';
+  } catch { /* no id: the owner is then hostname, platform and distro, as before */ }
+  return '';
+};
+export const ownerOf = (host, platform, distro, boot) => [host, platform, distro, boot && `boot-${boot}`].filter(Boolean).join('/');
+export const OWNER = ownerOf(hostname(), process.platform, process.env.WSL_DISTRO_NAME, bootIdOf(process.platform));
 const pidAlive = (pid) => {
   try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; }
 };
@@ -291,7 +302,7 @@ export const rehearseDocker = async (opts, print) => {
   let finished = false;
   try {
     // Data lives in memory (much faster to initialise and load) unless the seed is too big for that or --disk is given.
-    // No network: the database is reached with docker exec only, so a --keep'd copy of production data is not reachable from other containers.
+    // No network (or, for the engines that need an interface, an internal one): the database is reached with docker exec only, so a --keep'd copy of production data is not reachable from other containers.
     const tmpfs = opts.disk !== true && seedBytes(source) <= TMPFS_SEED_LIMIT;
     // Oracle's instance fails (ORA-00600 ksipc) without a non-loopback interface: it gets a private network with no
     // outside access that nothing else is attached to, which keeps the data as unreachable as --network none does.
@@ -350,7 +361,12 @@ export const rehearseDocker = async (opts, print) => {
     const apply = async (file, kind) => {
       const part = partFor(file, kind, eng.dialect);
       const wrap = wrapsFile(profile, { noTransaction: part.markers.noTransaction, statements: part.statements, dialect: eng.dialect });
-      const { input, marked } = eng.scriptInput(part.sql, { wrap, marks: true });
+      const { input, marked, error } = eng.scriptInput(part.sql, { wrap, marks: true });
+      if (error) {
+        failed++;
+        print(`FAILED  ${kind.padEnd(4)} ${file}: ${error}`);
+        return false;
+      }
       const before = current;
       const a = performance.now();
       const r = await docker(eng.scriptArgs(name, { app: MIGRATION_APP, stopOnError: true, wrap }), { input, timeoutMs: 3600000 });
@@ -414,7 +430,7 @@ export const rehearseDocker = async (opts, print) => {
     if (opts.keep && finished) {
       live.delete(name);
       liveNets.delete(name);
-      print(`container ${name} kept for inspection (password ${eng.password}, no network: use docker exec).\n  connect: ${eng.shell(name)}\n  remove:  docker rm -f -v ${name}${eng.needsNetwork ? ` && docker network rm ${name}` : ''}`);
+      print(`container ${name} kept for inspection (password ${eng.password}, ${eng.needsNetwork ? 'a private internal network with no outside access' : 'no network'}: use docker exec).\n  connect: ${eng.shell(name)}\n  remove:  docker rm -f -v ${name}${eng.needsNetwork ? ` && docker network rm ${name}` : ''}`);
     } else {
       await docker(['rm', '-f', '-v', name], { timeoutMs: 120000 }).catch(() => {});
       live.delete(name);
