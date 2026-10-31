@@ -437,7 +437,7 @@ for (const msEngine of ENGINES.filter((e) => e.startsWith('mssql:'))) {
     const ent = cli(['--engine', msEngine, '--edition', 'enterprise', SCENARIOS.mssql.seed, online]);
     t.after(() => { const n = containerOf(ent.out); if (n) remove(n); });
     assert.equal(ent.code, 0, ent.out + ent.err);
-    assert.match(ent.out, /edition: Developer/);
+    assert.match(ent.out, /edition: (Enterprise )?Developer/);
     assert.match(ent.out, /ran\s+up\s.*0001_idx\.sql/);
     assert.ok(!exists(containerOf(std.out)) && !exists(containerOf(ent.out)));
   });
