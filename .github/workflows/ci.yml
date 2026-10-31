@@ -4,12 +4,17 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+  schedule:
+    # the Db2 rehearsal (large, privileged image, slow start) runs here and on demand, not on every pull request
+    - cron: '17 4 * * 1'
 
 permissions:
   contents: read
 
 jobs:
   test:
+    if: github.event_name != 'schedule'
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -38,7 +43,7 @@ jobs:
             "$@" > /dev/null || code=$?
             if [ "$code" -ne 1 ]; then echo "expected exit 1, got $code: $*"; exit 1; fi
           }
-          for d in postgres postgres-locks mysql sqlite sqlite-rebuild; do
+          for d in postgres postgres-locks mysql sqlite sqlite-rebuild mssql mssql-efcore mssql-dacpac oracle db2; do
             expect_exit_1 node skills/migrations-safe/scripts/migration-lint.mjs "skills/migrations-safe/fixtures/bad/$d"
           done
       - name: Rehearse the SQLite fixtures
@@ -51,6 +56,7 @@ jobs:
           if [ "$code" -ne 1 ]; then echo "the lossy rebuild must exit 1, got $code"; exit 1; fi
 
   docker-rehearsal:
+    if: github.event_name != 'schedule'
     timeout-minutes: 30
     runs-on: ubuntu-latest
     env:
@@ -87,7 +93,82 @@ jobs:
           left=$(docker ps -aq --filter name=msafe-rehearse-)
           if [ -n "$left" ]; then echo "containers left behind:"; docker ps -a --filter name=msafe-rehearse-; exit 1; fi
 
+  docker-mssql:
+    if: github.event_name != 'schedule'
+    timeout-minutes: 60
+    runs-on: ubuntu-latest
+    env:
+      MSAFE_REQUIRE_DOCKER: '1'
+      # 2022 and 2025: --edition standard runs Express (2022) or Standard Developer (2025), --edition enterprise runs Developer
+      MSAFE_DOCKER_ENGINES: mssql:2022-latest,mssql:2025-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Pull the engines
+        run: |
+          docker pull mcr.microsoft.com/mssql/server:2022-latest
+          docker pull mcr.microsoft.com/mssql/server:2025-latest
+      - name: SQL Server rehearsal tests
+        run: node --test test/rehearse-docker.test.mjs
+      - name: Rehearse the seed on SQL Server 2022 Developer
+        run: |
+          S=skills/migrations-safe
+          printf 'ALTER TABLE orders ADD due_on date NULL;\n' > /tmp/ms-add.sql
+          node $S/scripts/rehearse.mjs --engine mssql:2022-latest --edition enterprise $S/fixtures/seed-mssql.sql /tmp/ms-add.sql
+      - name: No rehearsal container or network is left behind
+        if: always()
+        run: |
+          left=$(docker ps -aq --filter label=msafe-rehearse=1)$(docker network ls -q --filter label=msafe-rehearse=1)
+          if [ -n "$left" ]; then echo "left behind:"; docker ps -a --filter label=msafe-rehearse=1; docker network ls --filter label=msafe-rehearse=1; exit 1; fi
+
+  docker-oracle:
+    if: github.event_name != 'schedule'
+    timeout-minutes: 60
+    runs-on: ubuntu-latest
+    env:
+      MSAFE_REQUIRE_DOCKER: '1'
+      MSAFE_DOCKER_ENGINES: oracle:23-slim-faststart
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Pull the engine
+        run: docker pull gvenzl/oracle-free:23-slim-faststart
+      - name: Oracle rehearsal tests
+        run: node --test test/rehearse-docker.test.mjs
+      - name: No rehearsal container or network is left behind
+        if: always()
+        run: |
+          left=$(docker ps -aq --filter label=msafe-rehearse=1)$(docker network ls -q --filter label=msafe-rehearse=1)
+          if [ -n "$left" ]; then echo "left behind:"; docker ps -a --filter label=msafe-rehearse=1; docker network ls --filter label=msafe-rehearse=1; exit 1; fi
+
+  docker-db2:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    timeout-minutes: 90
+    runs-on: ubuntu-latest
+    env:
+      MSAFE_REQUIRE_DOCKER: '1'
+      MSAFE_DOCKER_ENGINES: db2:11.5.9.0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Pull the engine
+        run: docker pull icr.io/db2_community/db2:11.5.9.0
+      - name: Db2 rehearsal tests
+        run: node --test test/rehearse-docker.test.mjs
+      - name: No rehearsal container or network is left behind
+        if: always()
+        run: |
+          left=$(docker ps -aq --filter label=msafe-rehearse=1)$(docker network ls -q --filter label=msafe-rehearse=1)
+          if [ -n "$left" ]; then echo "left behind:"; docker ps -a --filter label=msafe-rehearse=1; docker network ls --filter label=msafe-rehearse=1; exit 1; fi
+
   validate:
+    if: github.event_name != 'schedule'
     timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:

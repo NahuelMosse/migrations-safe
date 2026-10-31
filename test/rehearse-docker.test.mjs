@@ -425,8 +425,7 @@ if (db2Engine) {
   });
 }
 
-const msEngine = ENGINES.find((e) => e.startsWith('mssql:'));
-if (msEngine) {
+for (const msEngine of ENGINES.filter((e) => e.startsWith('mssql:'))) {
   test(`${msEngine}: --edition standard runs a non-Enterprise edition (ONLINE fails), --edition enterprise runs Developer (ONLINE works)`, { skip, timeout: 2400000 }, (t) => {
     const dir = scratch(t);
     const online = put(dir, '0001_idx.sql', 'CREATE INDEX ix_orders_note ON orders (user_id) WITH (ONLINE = ON);\n');
