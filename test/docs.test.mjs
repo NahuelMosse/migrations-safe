@@ -84,7 +84,7 @@ const rulesOf = (dir, extra = []) => {
 };
 
 test('fixtures: good ones are clean even with --fail-on warning, bad ones fail with exactly the advertised rules', () => {
-  for (const dir of ['good/postgres', 'good/sqlite', 'good/mysql', 'good/mssql']) assert.deepEqual(rulesOf(dir, ['--strict']), { code: 0, found: [] }, dir);
+  for (const dir of ['good/postgres', 'good/sqlite', 'good/mysql', 'good/mssql', 'good/oracle']) assert.deepEqual(rulesOf(dir, ['--strict']), { code: 0, found: [] }, dir);
   assert.deepEqual(rulesOf('bad/postgres').found, [
     'error:change-column-type', 'error:concurrently-in-transaction', 'error:constraint-without-not-valid', 'error:drop-column',
     'error:drop-table', 'error:index-without-concurrently', 'error:not-null-without-default', 'error:rename-column',
@@ -115,5 +115,11 @@ test('fixtures: good ones are clean even with --fail-on warning, bad ones fail w
   ]);
   assert.deepEqual(rulesOf('bad/mssql-dacpac').found, ['error:rebuild-drops-column']);
   assert.deepEqual(rulesOf('bad/mssql-goose').found, ['warning:unsupported-separator']);
-  for (const dir of ['bad/postgres', 'bad/sqlite', 'bad/postgres-locks', 'bad/mysql', 'bad/sqlite-rebuild', 'bad/mssql', 'bad/mssql-efcore', 'bad/mssql-dacpac']) assert.equal(rulesOf(dir).code, 1, dir);
+  assert.deepEqual(rulesOf('bad/oracle').found, [
+    'error:drop-column', 'error:oracle-add-column-default', 'error:oracle-constraint-validate', 'error:oracle-index-not-online',
+    'error:oracle-online-unsupported-edition', 'error:oracle-online-unsupported-edition', 'warning:missing-down', 'warning:not-atomic',
+    'warning:oracle-ddl-commits-dml', 'warning:oracle-ddl-lock-timeout', 'warning:oracle-drop-column-rewrites',
+  ]);
+  assert.deepEqual(rulesOf('bad/oracle-plsql').found, ['error:oracle-missing-slash', 'warning:missing-down', 'warning:not-atomic', 'warning:oracle-ddl-lock-timeout']);
+  for (const dir of ['bad/postgres', 'bad/sqlite', 'bad/postgres-locks', 'bad/mysql', 'bad/sqlite-rebuild', 'bad/mssql', 'bad/mssql-efcore', 'bad/mssql-dacpac', 'bad/oracle', 'bad/oracle-plsql']) assert.equal(rulesOf(dir).code, 1, dir);
 });

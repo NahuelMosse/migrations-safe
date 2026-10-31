@@ -8,6 +8,8 @@ import { GOT, mysqlAlterRules as mysqlRules } from './mysql-rules.mjs';
 import { DEFAULT_EDITION, DEFAULT_SERVER_VERSION, parseServerVersion } from './server-version.mjs';
 import { normalizeTsqlActions, spRename } from './mssql.mjs';
 import { DROP_COLUMN_NOTE, mssqlAlterRules, mssqlIndexRules } from './mssql-rules.mjs';
+import { COMMITS, DDL_LOCK_TIMEOUT, isDdl, isDml } from './oracle.mjs';
+import { oracleAlterRules, oracleStatementRules } from './oracle-rules.mjs';
 
 export const ERROR = 'error';
 export const WARN = 'warning';
@@ -55,6 +57,14 @@ export const RULES = [
   { id: 'mssql-lock-timeout', level: WARN, area: 'lock' },
   { id: 'mssql-constraint-with-check', level: ERROR, area: 'lock' },
   { id: 'mssql-constraint-nocheck', level: WARN, area: 'lock' },
+  { id: 'oracle-add-column-default', level: ERROR, area: 'lock' },
+  { id: 'oracle-ddl-lock-timeout', level: WARN, area: 'lock' },
+  { id: 'oracle-ddl-commits-dml', level: WARN, area: 'transaction' },
+  { id: 'oracle-index-not-online', level: ERROR, area: 'lock' },
+  { id: 'oracle-online-unsupported-edition', level: ERROR, area: 'lock' },
+  { id: 'oracle-constraint-validate', level: ERROR, area: 'lock' },
+  { id: 'oracle-drop-column-rewrites', level: WARN, area: 'lock' },
+  { id: 'oracle-missing-slash', level: ERROR, area: 'tool' },
   { id: 'missing-lock-timeout', level: WARN, area: 'lock' },
   { id: 'concurrently-in-transaction', level: ERROR, area: 'transaction' },
   { id: 'transaction-conflict', level: WARN, area: 'transaction' },
@@ -74,7 +84,7 @@ const VOLATILE_FN = /\b(?:random|setseed|gen_random_uuid|uuid_generate_v\w+|cloc
 const DEFAULT_END = /\b(?:not null|null|check|references|unique|primary key|constraint|collate|generated|on update)\b/i;
 const NON_COLUMN_ADD = /^(?:constraint|index|key|unique|primary|foreign|check|fulltext|spatial|partition)\b/i;
 const NOT_COLUMN_DROP = /^drop (?:constraint|index|key|default|not null|primary|foreign|check|partition|expression|identity)\b/i;
-const NON_DDL = /^(?:begin|start transaction|commit|rollback|end\b|if\b|else\b|use\b|print\b|declare\b|:\w|@|prompt\b|whenever\b|spool\b|exit\b|quit\b|rem\b|define\b|set\b|pragma\b|select\b)/i;
+const NON_DDL = /^(?:begin|start transaction|commit|rollback|alter\s+session\b|end\b|if\b|else\b|use\b|print\b|declare\b|:\w|@|prompt\b|whenever\b|spool\b|exit\b|quit\b|rem\b|define\b|set\b|pragma\b|select\b)/i;
 const TX_START =/^(?:begin|start transaction)\b/i;
 const LOCK_TIMEOUT = /^(?:set\s+(?:session\s+|local\s+)?lock_timeout\b|select\s+set_config\s*\(\s*'lock_timeout')/i;
 const MYSQL_LOCK_WAIT = /^(?:set\s+(?:session\s+|local\s+|@@session\.|@@local\.|@@)?lock_wait_timeout\s*=|set\s+statement\b.*\block_wait_timeout\s*=)/i;
@@ -136,6 +146,7 @@ export const lintSql = (sql, ctx = {}) => {
   const pg = dialect === 'postgres';
   const my = dialect === 'mysql';
   const ms = dialect === 'mssql';
+  const ora = dialect === 'oracle';
   const serverVersion = ctx.serverVersion ?? parseServerVersion(dialect, DEFAULT_SERVER_VERSION[dialect]);
   const edition = ctx.edition ?? DEFAULT_EDITION[dialect];
   const mysqlVersion = ctx.mysqlVersion ?? parseMysqlVersion(DEFAULT_MYSQL_VERSION);
@@ -163,7 +174,8 @@ export const lintSql = (sql, ctx = {}) => {
   const generated = ctx.generated === true && profile.generatesSql;
   const wrapped = !generated && wrapsFile(profile, { noTransaction, statements: statements.length, dialect });
   const explicitWrap = !generated && wrapsFor(profile, dialect) === true && !noTransaction;
-  const explicitTx = texts.some((t) => TX_START.test(t));
+  // in Oracle BEGIN opens a PL/SQL block, never a transaction (there is no BEGIN TRANSACTION)
+  const explicitTx = !ora && texts.some((t) => TX_START.test(t));
 
   let directiveState;
   const add = (k, rule, message, extra = {}) => {
@@ -200,6 +212,7 @@ export const lintSql = (sql, ctx = {}) => {
     const existing = isExisting(table);
     const actions = ms ? normalizeTsqlActions(rawActions) : rawActions;
     if (my && existing) mysqlAlterRules(k, table, actions);
+    if (ora && existing) oracleAlterRules({ add: (rule, message, extra) => add(k, rule, message, extra), table, actions, version: serverVersion, text, edition });
     if (ms && existing) mssqlAlterRules({ add: (rule, message, extra) => add(k, rule, message, extra), table, actions, version: serverVersion, edition });
     if (dialect === 'mysql' && !/\balgorithm\s*=/i.test(text))
       add(k, 'mysql-no-algorithm', `ALTER TABLE ${table} without ALGORITHM/LOCK may copy the table under lock: declare ALGORITHM=INSTANT (alone, it takes no LOCK clause) or ALGORITHM=INPLACE, LOCK=NONE so it fails instead; for a COPY on a big table use gh-ost`);
@@ -255,10 +268,17 @@ export const lintSql = (sql, ctx = {}) => {
 
   let firstLock = -1;
   let lockTimeoutAt = -1;
+  let pendingDml = -1;
   let reportedTx = false;
   let reportedPragma = false;
   texts.forEach((t, k) => {
     const b = bare[k];
+    if (ora && !statements[k].command) {
+      if (pendingDml !== -1 && isDdl(t))
+        add(k, 'oracle-ddl-commits-dml', `a DDL statement commits the transaction: the DML at line ${statements[pendingDml].line} (and everything since the last COMMIT) is committed here, so a failure afterwards does not roll it back — COMMIT it on purpose before the DDL, or move the data change to its own migration`);
+      if (isDml(t) && !statements[k].inner) { if (pendingDml === -1) pendingDml = k; }
+      else if (isDdl(t) || COMMITS.test(t)) pendingDml = -1;
+    }
     const fkSwitch = t.match(FK_CHECKS);
     if (fkSwitch) fkChecksOff = /^(?:0|off|false)$/i.test(fkSwitch[1]);
     const create = t.match(new RegExp(String.raw`^create (?:temp(?:orary)? |unlogged )?table (?:if not exists )?(${ident})`, 'i'));
@@ -284,6 +304,12 @@ export const lintSql = (sql, ctx = {}) => {
       if (sp?.kind === 'object' && !created.has(sp.table) && !rebuilt(name(sp.to)))
         add(k, 'rename-table', `renames table ${sp.table} in one step (sp_rename): create the new one (or a view with the old name) and move readers first`);
       if (sp && firstLock === -1 && isExisting(sp.table)) firstLock = k;
+    }
+    if (ora) {
+      const stmt = statements[k];
+      if (stmt.plsql && stmt.slash === false)
+        add(k, 'oracle-missing-slash', 'a PL/SQL block (or CREATE PROCEDURE/FUNCTION/TRIGGER/PACKAGE/TYPE) must end with a `/` on a line of its own: without it SQL*Plus and Flyway keep reading, and the statements that follow become part of the block');
+      if (oracleStatementRules({ add: (rule, message, extra) => add(k, rule, message, extra), text: t, isExisting, edition }) && firstLock === -1) firstLock = k;
     }
     if (my) {
       const optimize = t.match(new RegExp(String.raw`^optimize (?:(?:no_write_to_binlog|local) )?table (.*)$`, 'i'));
@@ -353,7 +379,7 @@ export const lintSql = (sql, ctx = {}) => {
       reportedPragma = true;
       add(k, 'transaction-conflict', `PRAGMA foreign_keys is a no-op inside the transaction ${profile.label} wraps around the file, so DROP TABLE still runs ON DELETE CASCADE / SET NULL on child rows. Run the rebuild in the runner's no-transaction mode, where foreign_keys=OFF takes effect (PRAGMA defer_foreign_keys only helps plain NO ACTION foreign keys), and rehearse it with real child rows`, { level: copiedFrom.size ? ERROR : WARN });
     }
-    if ((my ? MYSQL_LOCK_WAIT : LOCK_TIMEOUT).test(t) && lockTimeoutAt === -1) lockTimeoutAt = k;
+    if ((my ? MYSQL_LOCK_WAIT : ora ? DDL_LOCK_TIMEOUT : LOCK_TIMEOUT).test(t) && lockTimeoutAt === -1) lockTimeoutAt = k;
     applySchema(tables, t);
   });
 
@@ -361,6 +387,11 @@ export const lintSql = (sql, ctx = {}) => {
     add(firstLock, 'mysql-lock-wait-timeout', lockTimeoutAt === -1
       ? `DDL on an existing table without SET SESSION lock_wait_timeout: the statement waits for the table's metadata lock behind any open transaction (even an idle one) and every later query on the table queues behind it — SET SESSION lock_wait_timeout = 5 (MariaDB also accepts \`WAIT 5\` on the ALTER) and retry with backoff`
       : 'lock_wait_timeout is set after the first DDL on an existing table, so that statement waits for its lock without a limit: move the SET before it', { line: statements[firstLock].line });
+
+  if (ora && firstLock !== -1 && (lockTimeoutAt === -1 || lockTimeoutAt > firstLock))
+    add(firstLock, 'oracle-ddl-lock-timeout', lockTimeoutAt === -1
+      ? "DDL on an existing table without ALTER SESSION SET DDL_LOCK_TIMEOUT: Oracle does not queue the statement, it fails at once with ORA-00054 (resource busy) when any transaction holds the table — the risk is a half-applied deploy (each DDL committed, the rest not run); ALTER SESSION SET DDL_LOCK_TIMEOUT = 30 makes it wait up to 30 s instead, and retry the whole migration on failure"
+      : 'DDL_LOCK_TIMEOUT is set after the first DDL on an existing table, so that statement fails at once on a busy table: move the ALTER SESSION before it', { line: statements[firstLock].line });
 
   if (ms && firstLock !== -1 && (lockTimeoutAt === -1 || lockTimeoutAt > firstLock))
     add(firstLock, 'mssql-lock-timeout', lockTimeoutAt === -1
