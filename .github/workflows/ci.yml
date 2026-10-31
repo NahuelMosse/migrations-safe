@@ -86,7 +86,7 @@ jobs:
           node $S/scripts/rehearse.mjs --engine mysql:8.4.2 $S/fixtures/seed-mysql.sql /tmp/my-add.sql
           node $S/scripts/rehearse.mjs --engine mariadb:11.4.3 $S/fixtures/seed-mysql.sql /tmp/my-add.sql
           printf 'ALTER TABLE orders ADD COLUMN due_on date NULL;\n' > /tmp/my57-add.sql
-          node $S/scripts/rehearse.mjs --engine mysql:5.7.44$S/fixtures/seed-mysql.sql /tmp/my57-add.sql
+          node $S/scripts/rehearse.mjs --engine mysql:5.7.44 $S/fixtures/seed-mysql.sql /tmp/my57-add.sql
       - name: No rehearsal container is left behind
         if: always()
         run: |
