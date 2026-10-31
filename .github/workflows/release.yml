@@ -45,6 +45,8 @@ jobs:
         run: |
           name=$(node -p "require('./package.json').name")
           pkg=$(node -p "require('./package.json').version")
-          if [ "$GITHUB_REF_TYPE" != "tag" ]; then npm publish --dry-run
+          # A prerelease (1.3.0-rc.0) goes to the `next` dist-tag: `latest` only ever points at a stable version.
+          case "$pkg" in *-*) tag=next ;; *) tag=latest ;; esac
+          if [ "$GITHUB_REF_TYPE" != "tag" ]; then npm publish --dry-run --tag "$tag"
           elif [ "$(npm view "$name@$pkg" version 2>/dev/null)" = "$pkg" ]; then echo "$name@$pkg is already on npm (the first version is published by hand): nothing to publish"
-          else npm publish; fi
+          else npm publish --tag "$tag"; fi

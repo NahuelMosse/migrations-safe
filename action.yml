@@ -1,5 +1,7 @@
-# Runs migration-lint from this action's own checkout, so the project needs no Node tooling of its own.
-# `--history` compares the branch with its base: the caller's actions/checkout needs `fetch-depth: 0`.
+# Runs `migrations-safe lint` from this action's own checkout, so the project needs no Node tooling of its own.
+# `--history` compares the branch with its base: the caller's actions/checkout needs `fetch-depth: 0` (on a shallow
+# clone the command exits 2 and says so). `args` reaches the command through the environment and is split in Node
+# without any shell expansion.
 name: migrations-safe
 description: Lint database migrations and check the git history of applied ones (PostgreSQL, SQLite, MySQL, MariaDB, SQL Server, Oracle, Db2).
 branding:
@@ -7,7 +9,7 @@ branding:
   color: blue
 inputs:
   args:
-    description: Arguments for migration-lint (run `migration-lint --help` for the list).
+    description: Arguments for `migrations-safe lint`, quoted like a shell would but never expanded (`migrations-safe lint --help` lists them).
     default: --history --base origin/${{ github.base_ref }} --format github
   node-version:
     description: Node.js version to run it with (22.13 or newer).
@@ -21,4 +23,4 @@ runs:
     - shell: bash
       env:
         MSAFE_ARGS: ${{ inputs.args }}
-      run: node "${{ github.action_path }}/skills/migrations-safe/scripts/migration-lint.mjs" $MSAFE_ARGS
+      run: node "${{ github.action_path }}/skills/migrations-safe/scripts/migrations-safe.mjs" lint --args-from-env MSAFE_ARGS

@@ -23,11 +23,7 @@ test('package.json is publishable and its version matches the plugin manifest', 
   assert.equal(pkg.name, 'migrations-safe');
   assert.equal(pkg.private, undefined);
   assert.equal(pkg.version, json('.claude-plugin', 'plugin.json').version);
-  assert.deepEqual(pkg.bin, {
-    'migration-lint': 'skills/migrations-safe/scripts/migration-lint.mjs',
-    rehearse: 'skills/migrations-safe/scripts/rehearse.mjs',
-    'rehearse-sqlite': 'skills/migrations-safe/scripts/rehearse-sqlite.mjs',
-  });
+  assert.deepEqual(pkg.bin, { 'migrations-safe': 'skills/migrations-safe/scripts/migrations-safe.mjs' });
   assert.deepEqual(pkg.publishConfig, { access: 'public', provenance: true });
   assert.equal(pkg.dependencies, undefined, 'zero runtime dependencies');
   assert.match(pkg.repository.url, /^git\+https:\/\/github\.com\/NahuelMosse\/migrations-safe\.git$/);
@@ -45,24 +41,24 @@ test('the tarball holds exactly the expected files, installs into an empty proje
   await npm(['install', '--no-audit', '--no-fund', '--ignore-scripts', join(dest, packed.filename)], project);
   const installed = join(project, 'node_modules', 'migrations-safe');
   const bin = JSON.parse(readFileSync(join(installed, 'package.json'), 'utf8')).bin;
-  const entry = (name) => join(installed, ...bin[name].split('/'));
+  const entry = join(installed, ...bin['migrations-safe'].split('/'));
 
-  for (const name of ['migration-lint', 'rehearse', 'rehearse-sqlite']) {
-    const viaShim = await npm(['exec', '--no-install', '--', name, '--help'], project);
-    assert.match(viaShim.stdout, /usage/i, name);
-    const direct = await node([entry(name), '--help'], project);
-    assert.equal(direct.code, 0, `${name}: ${direct.stderr}`);
+  for (const sub of ['lint', 'rehearse']) {
+    const viaShim = await npm(['exec', '--no-install', '--', 'migrations-safe', sub, '--help'], project);
+    assert.match(viaShim.stdout, new RegExp(`usage: migrations-safe ${sub}`), sub);
+    const direct = await node([entry, sub, '--help'], project);
+    assert.equal(direct.code, 0, `${sub}: ${direct.stderr}`);
   }
 
   const migrations = join(project, 'db');
   mkdirSync(migrations);
   cpSync(join(FIXTURES, 'good', 'postgres'), migrations, { recursive: true });
-  const lint = await node([entry('migration-lint'), 'db', '--strict'], project);
+  const lint = await node([entry, 'lint', 'db', '--strict'], project);
   assert.equal(lint.code, 0, lint.stdout + lint.stderr);
-  const bad = await node([entry('migration-lint'), join(FIXTURES, 'bad', 'postgres')], project);
+  const bad = await node([entry, 'lint', join(FIXTURES, 'bad', 'postgres')], project);
   assert.equal(bad.code, 1, bad.stdout + bad.stderr);
 
-  const rehearsal = await node([entry('rehearse'), join(FIXTURES, 'seed-sqlite.sql'), join(FIXTURES, 'good', 'sqlite', '0007_tasks_due.sql')], project);
+  const rehearsal = await node([entry, 'rehearse',join(FIXTURES, 'seed-sqlite.sql'), join(FIXTURES, 'good', 'sqlite', '0007_tasks_due.sql')], project);
   assert.equal(rehearsal.code, 0, rehearsal.stdout + rehearsal.stderr);
 });
 
@@ -72,9 +68,9 @@ test('the skill directory alone is self-contained: it runs and every import stay
   const copy = join(tempDir(), 'migrations-safe');
   mkdirSync(copy);
   cpSync(SKILL, copy, { recursive: true });
-  const help = await node([join(copy, 'scripts', 'migration-lint.mjs'), '--help'], tempDir());
+  const help = await node([join(copy, 'scripts', 'migrations-safe.mjs'), 'lint', '--help'], tempDir());
   assert.equal(help.code, 0, help.stderr);
-  assert.match(help.stdout, /usage/i);
+  assert.match(help.stdout, /usage: migrations-safe lint/);
 
   const files = sourceFiles(copy);
   assert.ok(files.length > 10);

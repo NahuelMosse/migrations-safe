@@ -1,6 +1,6 @@
 {
   "name": "migrations-safe",
-  "version": "1.2.1",
+  "version": "1.2.0",
   "description": "Linter, git history checks and SQLite, PostgreSQL, MySQL, MariaDB, SQL Server, Oracle and Db2 rehearsal for database migrations; also a Claude Code plugin.",
   "keywords": ["migrations", "database", "sql", "lint", "postgresql", "mysql", "mariadb", "sqlite", "sql-server", "oracle", "db2", "flyway", "prisma", "cli"],
   "license": "MIT",
@@ -15,9 +15,7 @@
   },
   "type": "module",
   "bin": {
-    "migration-lint": "skills/migrations-safe/scripts/migration-lint.mjs",
-    "rehearse": "skills/migrations-safe/scripts/rehearse.mjs",
-    "rehearse-sqlite": "skills/migrations-safe/scripts/rehearse-sqlite.mjs"
+    "migrations-safe": "skills/migrations-safe/scripts/migrations-safe.mjs"
   },
   "files": [
     "skills/migrations-safe",

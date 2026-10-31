@@ -1,20 +1,16 @@
 # Changelog
 
-## 1.2.1
-
-Published as the `migrations-safe` npm package; GitHub Action.
-
-- `npm i -D migrations-safe` installs `migration-lint`, `rehearse` and `rehearse-sqlite`; the CLI stays inside
-  `skills/migrations-safe/`, so the skill directory copied alone still works. Releases are published from a tag
-  with provenance.
-- `uses: NahuelMosse/migrations-safe@v1.2.1` runs `migration-lint` in any repository without Node tooling
-  (inputs `args`, `node-version`); the default is the history check against the pull request's base.
-- Test fixtures and seeds live in `test/fixtures/` and are not part of the package.
-
 ## 1.2.0
 
-SQL Server, Oracle and Db2 LUW at the depth MySQL got in 1.1.
+SQL Server, Oracle and Db2 LUW at the depth MySQL got in 1.1; published as the `migrations-safe` npm package, with a
+GitHub Action.
 
+- `npm i -D migrations-safe` installs one command, `migrations-safe lint ...` and `migrations-safe rehearse ...`
+  (the same CLIs as `migration-lint.mjs` and `rehearse.mjs`). The CLI stays inside `skills/migrations-safe/`, so the
+  skill directory copied alone still works. Releases are published from a tag with provenance.
+- `uses: NahuelMosse/migrations-safe@v1.2.0` runs `migrations-safe lint` in any repository without Node tooling
+  (inputs `args`, `node-version`); the default is the history check against the pull request's base.
+- Test fixtures and seeds live in `test/fixtures/` and are not part of the package.
 - The dialect is also inferred from the files next to the migrations (Flyway and Liquibase jdbc URL, `.sqlproj`,
   EF Core provider, Spring Boot `application*.properties|yml`, Maven/Gradle dependencies, connection strings,
   compose images). The migration tool's own configuration outranks the syntax of a file; a disagreement is

@@ -12,6 +12,7 @@
   "skills/migrations-safe/references/rehearsal.md",
   "skills/migrations-safe/references/rules.md",
   "skills/migrations-safe/references/runners.md",
+  "skills/migrations-safe/scripts/lib/args-env.mjs",
   "skills/migrations-safe/scripts/lib/db2-rules.mjs",
   "skills/migrations-safe/scripts/lib/db2.mjs",
   "skills/migrations-safe/scripts/lib/dialect-hints.mjs",
@@ -42,6 +43,7 @@
   "skills/migrations-safe/scripts/lib/schema.mjs",
   "skills/migrations-safe/scripts/lib/server-version.mjs",
   "skills/migrations-safe/scripts/migration-lint.mjs",
+  "skills/migrations-safe/scripts/migrations-safe.mjs",
   "skills/migrations-safe/scripts/rehearse-sqlite.mjs",
   "skills/migrations-safe/scripts/rehearse.mjs"
 ]

@@ -68,11 +68,11 @@ const formatFrom = (argv) => {
   return i !== -1 && FORMATS.includes(argv[i + 1]) ? argv[i + 1] : 'text';
 };
 
-export const runLintCli = (argv, { out = (s) => console.log(s), err = (s) => console.error(s) } = {}) => {
+export const runLintCli = (argv, { out = (s) => console.log(s), err = (s) => console.error(s), name = 'migration-lint.mjs' } = {}) => {
   const format = formatFrom(argv);
   try {
     const opts = parseArgs(argv);
-    if (opts.help) { out(USAGE); return 0; }
+    if (opts.help) { out(USAGE.replace('usage: migration-lint.mjs', `usage: ${name}`)); return 0; }
     opts.stdin = opts.paths.includes('-') ? decodeSql(readFileSync(0)) : null;
     const result = lintTargets(opts);
     out(renderResult(result, opts.format));
