@@ -169,8 +169,8 @@ for (const engine of ENGINES) {
     assert.match(r.out, /runner: (goose|dbmate)/);
     assert.match(r.out, /seed: the dump loaded with 1 error line\(s\)/);
     assert.match(r.out, /\(1 table\(s\), 2 row\(s\)\)/);
-    assert.match(r.out, /ran\s+up\s.*columns: \+nickname/);
-    assert.match(r.out, /ran\s+down\s.*columns: -nickname \(2 non-NULL\)/);
+    assert.match(r.out, /ran\s+up\s[^]*?columns: \+nickname/);
+    assert.match(r.out, /ran\s+down\s[^]*?columns: -nickname \(2 non-NULL\)/);
     assert.match(r.out, /after the down\(s\) the tables and columns match the seed/);
     assert.match(r.out, /1 up\(s\), 1 down\(s\) on .*all ran, no rows or values lost, no write lock over 2 s/);
     assert.ok(!exists(containerOf(r.out)));
