@@ -120,13 +120,13 @@ const startPoller = (eng, c) => {
     buf += d;
     let i;
     while ((i = buf.indexOf('\n')) !== -1) {
-      const line = buf.slice(0, i).replace(/\r$/, '').trimEnd();
+      const line = (eng.cleanLine ?? ((l) => l))(buf.slice(0, i).replace(/\r$/, '')).trimEnd();
       buf = buf.slice(i + 1);
       if (line === '@@END') {
         samples.push({ t: performance.now(), rows });
         rows = [];
         setTimeout(send, POLL_PAUSE_MS);
-      } else if (line) rows.push(line.split('\t').map((f) => f.trimEnd()));
+      } else if (line.includes('\t')) rows.push(line.split('\t').map((f) => f.trimEnd()));
     }
   });
   child.on('close', () => { if (!state.stopped) state.died = true; });

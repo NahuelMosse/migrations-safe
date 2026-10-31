@@ -163,20 +163,6 @@ jobs:
           node-version: '24'
       - name: Pull the engine
         run: docker pull icr.io/db2_community/db2:11.5.9.0
-      - name: Db2 client probes (how the CLP reads a script from a pipe)
-        continue-on-error: true
-        run: |
-          docker run -d --name db2probe --privileged -e LICENSE=accept -e DB2INST1_PASSWORD=Msafe_Rehearsal1 -e DBNAME=REHEARSE -e ARCHIVE_LOGS=false -e AUTOCONFIG=false icr.io/db2_community/db2:11.5.9.0
-          for i in $(seq 1 60); do docker logs db2probe 2>&1 | grep -q "Setup has completed" && break; sleep 10; done
-          echo "--- stdin, no -f"
-          printf '%s\n' 'CONNECT TO REHEARSE~' 'VALUES 1~' | docker exec -i db2probe su - db2inst1 -c "db2 -x -td~"; echo "rc=$?"
-          echo "--- file in the container"
-          printf '%s\n' 'CONNECT TO REHEARSE~' 'VALUES 2~' | docker exec -i db2probe sh -c 'cat > /tmp/p.sql; chmod 644 /tmp/p.sql; su - db2inst1 -c "db2 -x -td~ -f /tmp/p.sql"'; echo "rc=$?"
-          echo "--- does output come while stdin is still open (needed by the lock poller)"
-          { echo 'CONNECT TO REHEARSE~'; sleep 3; echo 'VALUES 3~'; sleep 5; echo 'VALUES 4~'; sleep 1; } | docker exec -i db2probe su - db2inst1 -c "db2 -x -td~" | while IFS= read -r l; do echo "$(date +%S) $l"; done
-          echo "--- error exit code"
-          printf '%s\n' 'CONNECT TO REHEARSE~' 'SELECT * FROM nosuch~' | docker exec -i db2probe su - db2inst1 -c "db2 -x -td~ -s"; echo "rc=$?"
-          docker rm -f -v db2probe
       - name: Rehearse the seed on Db2
         run: |
           S=skills/migrations-safe

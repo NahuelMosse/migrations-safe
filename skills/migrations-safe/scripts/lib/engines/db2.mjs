@@ -28,16 +28,24 @@ const num = (expr) => `TRIM(CHAR(${expr}))`;
 export const clpInput = (sql) => parse(sql, { dialect: 'db2' }).statements.filter((s) => !s.command).map((s) => `${s.text}\n${T}`).join('\n');
 
 export const makeDb2 = ({ kind, image }) => {
-  const prologue = (app) => [`CONNECT TO ${DATABASE}${T}`, ...(app ? [`CALL SYSPROC.WLM_SET_CLIENT_INFO(NULL, NULL, '${app}', NULL, NULL)${T}`] : [])];
-  // `dump` scripts keep the `;` terminator of the dump tools; every other script is sent with `~`
-  const clp = (c, { app, stopOnError = true, dump = false } = {}) => ['exec', '-i', c, 'sh', '-c',
-    `{ printf '%s\\n' ${(dump ? prologue(app).map((l) => l.replace(/~$/, ';')) : prologue(app)).map(shq).join(' ')}; cat; } | su - db2inst1 -c "db2 -x -t${dump ? '' : 'd~'}${stopOnError ? ' -s' : ''} -f /dev/stdin"; rc=$?; if [ $rc -ge 4 ]; then exit 1; fi; exit 0`];
+  // The connection banner and the client-info call print text: output is off while they run.
+  const prologue = (app) => [`UPDATE COMMAND OPTIONS USING O OFF${T}`, `CONNECT TO ${DATABASE}${T}`,
+    ...(app ? [`CALL SYSPROC.WLM_SET_CLIENT_INFO(NULL, NULL, '${app}', NULL, NULL)${T}`] : []), `UPDATE COMMAND OPTIONS USING O ON${T}`];
+  // The CLP cannot read a script from /dev/stdin (DB21005E): a script that is sent whole is written to a file in the
+  // container and run with -f. `dump` scripts keep the `;` terminator of the dump tools; every other script is sent with `~`.
+  const clp = (c, { app, stopOnError = true, dump = false, script = null } = {}) => ['exec', '-i', c, 'sh', '-c',
+    `f=$(mktemp /tmp/msafe.XXXXXX); { printf '%s\\n' ${(dump ? prologue(app).map((l) => l.replace(/~$/, ';')) : prologue(app)).map(shq).join(' ')}; ${script === null ? 'cat' : `printf '%s\\n' ${shq(script)}`}; } > "$f"; chmod 644 "$f"; su - db2inst1 -c "db2 -x -t${dump ? '' : 'd~'}${stopOnError ? ' -s' : ''} -f $f"; rc=$?; rm -f "$f"; if [ $rc -ge 4 ]; then exit 1; fi; exit 0`];
+  // The lock poller keeps one session and sends it a query every few tenths of a second: the interactive CLP reads
+  // stdin as it arrives (and prefixes its output with the `db2 => ` prompt, which the line cleaner removes).
+  const interactive = (c, app) => ['exec', '-i', c, 'sh', '-c',
+    `{ printf '%s\\n' ${prologue(app).map(shq).join(' ')}; cat; } | su - db2inst1 -c "db2 -x -td${T}"`];
   const eng = {
     kind, image, label: 'Db2', dialect: 'db2', password: PASSWORD, database: DATABASE, implicitCommit: false, startupMs: 600000, needsNetwork: true,
     editionNote: 'edition: Db2 Community Edition (the image limits memory and cores; the DDL behaviour the rules rely on is the same as in the licensed editions)',
     runArgs: () => ['--privileged', '-e', 'LICENSE=accept', '-e', `DB2INST1_PASSWORD=${PASSWORD}`, '-e', `DBNAME=${DATABASE}`, '-e', 'ARCHIVE_LOGS=false', '-e', 'AUTOCONFIG=false', image],
     // one CLP process does the connect and the query: separate `db2` commands do not share a connection here (SQL1024N)
-    readyArgs: (c) => ['exec', '-i', c, 'sh', '-c', `printf '%s\\n' 'CONNECT TO ${DATABASE}${T}' 'VALUES 1${T}' | su - db2inst1 -c "db2 -x -td${T} -f /dev/stdin"`],
+    readyArgs: (c) => clp(c, { stopOnError: true, script: `VALUES 1${T}` }),
+    cleanLine: (line) => line.replace(/^(?:db2 => )+/, ''),
     setup: async () => null,
     scriptArgs: (c, { app, stopOnError, dump }) => clp(c, { app, stopOnError, dump }),
     // a seed (not a dump) is rebuilt from its statements
@@ -47,7 +55,7 @@ export const makeDb2 = ({ kind, image }) => {
       marked: marks,
     }),
     queryArgs: (c) => clp(c, { app: SEED_APP }),
-    pollerArgs: (c) => clp(c, { app: POLLER_APP, stopOnError: false }),
+    pollerArgs: (c) => interactive(c, POLLER_APP),
     pollInput: () => `${POLL}\nVALUES ${AT} || 'END'${T}\n`,
     // the CLP writes SQL errors to stdout
     errorsOnStdout: true,
