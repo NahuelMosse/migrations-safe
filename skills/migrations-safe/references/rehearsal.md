@@ -49,14 +49,18 @@ node "${CLAUDE_SKILL_DIR}/scripts/rehearse.mjs" --engine mariadb:11 seed.sql 000
 
 Needs only the `docker` CLI: the database is reached with `docker exec <container> psql|mysql`, no port is
 published, and nothing but the standard images is used. The container is named `msafe-rehearse-<pid>-<id>`,
-started fresh, and removed at the end, also when a migration fails, the run errors or you press Ctrl+C.
-`--keep` leaves it running after a run that finished and prints `docker exec` and `docker rm -f -v` lines.
+started fresh with no network, and removed at the end, also when a migration fails, the run errors, or it gets
+Ctrl+C or SIGTERM (exit 130 and 143). A hard kill (TerminateProcess, `Stop-Process`, a CI cancel, an IDE stop)
+cannot be caught and leaves the container; every start removes `msafe-rehearse-*` containers whose process is
+gone. `--keep` leaves it running after a run that finished and prints `docker exec` and `docker rm -f -v` lines.
 Exit 2: docker is not installed, its daemon does not answer, the image cannot be pulled, the seed does not
 load, bad arguments. An image that is not present is pulled first; it is left in the local cache.
 
-**Seed.** A `.sql` file loads strictly: any error is exit 2. `--dump <file>` takes `pg_dump` output (plain or
-custom format) or `mysqldump` output, `.gz` allowed, and tolerates errors, counting them (`ALTER ... OWNER`,
-missing roles and extensions are common in a scratch server). The data must hold the cases that break DDL:
+**Seed.** A `.sql` or `.sql.gz` file loads strictly: any error is exit 2. `--dump <file>` takes `pg_dump`
+output (plain or custom format) or `mysqldump` output, `.gz` allowed, goes before the migrations, and tolerates
+errors, counting them (`ALTER ... OWNER`, missing roles and extensions are common in a scratch server); only
+the line and error code of the first one are printed, since an error text can quote rows. A seed or dump that
+leaves no tables is exit 2. A `pg_restore` that exits non-zero is reported but not fatal while tables were loaded. The data must hold the cases that break DDL:
 NULLs, duplicates, orphans, the longest values, the maximum ids. The data directory is kept in memory (fast
 start and load) for seeds up to 256 MB; `--disk` or a bigger seed uses the container's disk.
 
@@ -68,13 +72,21 @@ then the ups again, and the tables and columns are compared with the seed.
 
 **What is measured.**
 
-- Duration of each migration, without the cost of the `docker exec` round trip.
-- Locks: a second session polls every ~40 ms while the migration runs. PostgreSQL: `pg_locks` joined with
+- Duration of each migration, taken inside the server between two timestamps of the same session
+  (`clock_timestamp()`, `SYSDATE(6)`), so the `docker exec` round trip is not in it; a file that sets its own
+  MySQL `DELIMITER` is timed from outside, minus the round trip.
+- Locks: a second session polls while the migration runs (the output says the measured interval, about
+  50 ms). Before the first migration the tool proves the measurement works: another session holds a lock on a
+  probe table for 3 s and the polling session must see it, otherwise exit 2 (MySQL 5.7 ships the metadata-lock
+  instrument disabled, so it is switched on first; MariaDB needs its `metadata_lock_info` plugin). During a
+  run, a polling session that reports an error, ends, or returns too few polls for the length of a migration
+  makes that migration `UNMEAS.`: its locks are unknown, the run fails, and "no lock" is never printed.
+  A lock on several modes of one table is one line (`AccessExclusiveLock + ShareLock on t`). PostgreSQL: `pg_locks` joined with
   `pg_stat_activity` for the migration's session, modes that block writes (`AccessExclusiveLock`,
   `ExclusiveLock`, `ShareRowExclusiveLock`, `ShareLock`). MySQL: `performance_schema.metadata_locks`
   (`EXCLUSIVE`, `SHARED_NO_WRITE`, `SHARED_NO_READ_WRITE`, `SHARED_READ_ONLY`). MariaDB:
   `information_schema.METADATA_LOCK_INFO` from its `metadata_lock_info` plugin. The time a lock is held is
-  first to last poll plus one poll interval, so a lock shorter than ~40 ms may not be seen, and the numbers
+  first to last poll plus one poll interval, so a lock shorter than the interval may not be seen, and the numbers
   are those of an idle scratch server: on a loaded one, waits behind other transactions come on top. Only
   tables that existed before the migration are reported. A lock held longer than `--lock-budget` (default
   2s; `500ms`, `2s`) is a failure (`LOCKED`).
@@ -82,8 +94,9 @@ then the ups again, and the tables and columns are compared with the seed.
   length, smallest and largest value as text). The same rules as SQLite decide what is a loss: a dropped
   table or column that held data, a row count that went down, a non-NULL count that went down; a dropped
   column that reappears under another name with the same fingerprint is reported as `renamed ...?`.
-  `--allow-loss tasks.priority,audit` marks intended losses. Tables of the connection's current schema only;
-  foreign-key orphans are not checked because the engine enforces its constraints.
+  `--allow-loss tasks.priority,audit` marks intended losses. PostgreSQL: every schema except the system ones
+  (a table outside `public` is named `schema.table`); MySQL: the `rehearsal` database. Foreign-key orphans are
+  not checked because the engine enforces its constraints.
 
 Not covered: waits behind other transactions (the scratch server has none), replication lag, and the N-1
 code's tests: run main's test suite against the migrated schema yourself (`--keep` leaves the database).

@@ -8,7 +8,7 @@ data, break the code already running, or lock a busy table.
 - `rehearse`: applies migrations to a copy of a SQLite database, or to a throwaway PostgreSQL, MySQL or
   MariaDB Docker container seeded from a `.sql` file or a dump, and reports rows and columns per table, lost
   values, duration and the write-blocking locks each migration held (`rehearse-sqlite` is the same command
-  with SQLite as the only engine).
+  under its older name).
 - The skill tells the agent when to run them and how to fix each finding (expand, migrate, contract).
 
 Zero runtime dependencies. Node 22.13 or newer.
@@ -70,7 +70,9 @@ Alembic, Django, Knex and Rails generate SQL at run time: pipe it in with `-`.
 | SQLite | generic rules, table rebuild checks | bundled `node:sqlite`, no Docker |
 
 The linter is regex-based; for PostgreSQL also run `squawk`. Server-engine rehearsals need the `docker` CLI and
-reach the database only through `docker exec`; the container is always removed.
+reach the database only through `docker exec` (the container has no network); it is removed when the run ends,
+also on failure, Ctrl+C or SIGTERM. A run killed without a chance to clean up (TerminateProcess, a CI cancel)
+leaves its container, and the next run removes containers whose process is gone.
 
 ## CI
 

@@ -6,7 +6,7 @@ export const usage = (name) => `usage: ${name} [--engine <engine>] <database.sql
 
   --engine <engine>   sqlite (default) | postgres:<tag> | mysql:<tag> | mariadb:<tag>, for example postgres:16
                       or mysql:8.4. A server engine runs a throwaway Docker container (name msafe-rehearse-*)
-                      that is reached with docker exec only and removed at the end, also on failure or Ctrl+C
+                      that is reached with docker exec only and removed at the end, also on failure, Ctrl+C or SIGTERM
   <database | seed>   sqlite: a database file (copied, never written) or a .sql seed loaded into an empty one;
                       server engines: a .sql seed (.sql.gz too), loaded strictly
   --dump <file>       server engines: a pg_dump (plain, custom format) or mysqldump file, optionally .gz,
@@ -39,7 +39,11 @@ const parseArgs = (argv) => {
     else if (a === '--down') { mode = 'down'; opts.downs = []; }
     else if (a === '--runner') opts.runner = value(i++, a);
     else if (a === '--engine') opts.engine = value(i++, a);
-    else if (a === '--dump') { opts.source = value(i++, a); opts.dump = true; }
+    else if (a === '--dump') {
+      if (opts.source !== null) throw new RehearsalUsageError(`--dump ${value(i, a)} would replace the seed or migration already given (${opts.source}): put --dump before the migrations, and give no other seed`);
+      opts.source = value(i++, a);
+      opts.dump = true;
+    }
     else if (a === '--keep') opts.keep = true;
     else if (a === '--disk') opts.disk = true;
     else if (a === '--lock-budget') opts.lockBudgetMs = parseDuration(value(i++, a));

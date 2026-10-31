@@ -119,7 +119,8 @@ reports, per table, rows and columns added, dropped or emptied. It fails on lost
 migrations that do not run; SQLite also on new foreign-key orphans. With `--engine` it also reports each
 migration's duration and the write-blocking locks it held (PostgreSQL `pg_locks`, MySQL and MariaDB metadata
 locks, polled from a second session), and fails when one is held longer than `--lock-budget` (default 2s).
-The container is always removed (also on failure and Ctrl+C); `--keep` leaves it and prints how to remove it.
+The container is removed when the run ends, also on failure, Ctrl+C and SIGTERM (a hard kill leaves it; the
+next run sweeps it); `--keep` leaves it and prints how to remove it.
 Exit 2 means docker is missing or cannot pull the image, never a pass. How to seed, read the output and what
 the lock numbers mean: [references/rehearsal.md](references/rehearsal.md). Load it before rehearsing.
 

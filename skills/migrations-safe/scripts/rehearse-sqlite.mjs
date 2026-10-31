@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Same command as rehearse.mjs, kept under its first name. Usage and options: `rehearse-sqlite.mjs --help`.
+// The same command as rehearse.mjs. Usage and options: `rehearse-sqlite.mjs --help`.
 import { basename } from 'node:path';
 import { runRehearseCli } from './lib/rehearse-cli.mjs';
 
