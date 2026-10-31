@@ -9,16 +9,15 @@ import { createGunzip, gunzipSync } from 'node:zlib';
 import { decodeSql, parse } from './parse.mjs';
 import { RUNNER_IDS, detectRunner, profileOf, wrapsFile } from './runners.mjs';
 import { RehearsalUsageError, diff, partFor } from './rehearse.mjs';
+import { makeEngine, mysqlInput } from './engines/index.mjs';
+import { MIGRATION_APP, PROBE_TABLE, SEED_APP, docker, firstLines } from './engines/shared.mjs';
 
+export { makeEngine, mysqlInput };
 export const ENGINE_KINDS = ['postgres', 'mysql', 'mariadb'];
 export const DEFAULT_LOCK_BUDGET_MS = 2000;
 export const SIGNAL_EXIT = { SIGHUP: 129, SIGINT: 130, SIGTERM: 143 };
-const PASSWORD = 'msafe';
-const DATABASE = 'rehearsal';
 const POLL_PAUSE_MS = 40;
 const TMPFS_SEED_LIMIT = 256 * 1024 * 1024;
-const MIGRATION_APP = 'msafe-migration';
-const PROBE_TABLE = 'msafe_probe';
 
 export const parseEngine = (spec) => {
   const [kind, ...rest] = String(spec).split(':');
@@ -46,25 +45,6 @@ export const seedBytes = (file) => {
   } finally { closeSync(fd); }
 };
 
-// ── docker ───────────────────────────────────────────────────────────────────────────────────────
-
-const docker = (args, { input, stream, timeoutMs = 600000 } = {}) => new Promise((resolve, reject) => {
-  const child = spawn('docker', args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
-  let out = '';
-  let err = '';
-  const timer = setTimeout(() => { child.kill(); reject(new RehearsalUsageError(`docker ${args[0]} timed out after ${Math.round(timeoutMs / 1000)} s`)); }, timeoutMs);
-  child.stdout.setEncoding('utf8').on('data', (d) => { out += d; });
-  child.stderr.setEncoding('utf8').on('data', (d) => { err += d; });
-  child.on('error', (e) => { clearTimeout(timer); reject(e); });
-  child.on('close', (code) => { clearTimeout(timer); resolve({ code, out, err }); });
-  child.stdin.on('error', () => { /* the client exited before reading everything: its exit code says why */ });
-  if (stream) {
-    stream.on('error', (e) => { child.kill(); reject(e); });
-    stream.pipe(child.stdin);
-  } else child.stdin.end(input ?? '');
-});
-
-const firstLines = (text, n = 3) => text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean).slice(0, n).join(' | ');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // Containers of this tool are named msafe-rehearse-<pid>-<id>. A run that is killed without a chance to clean
@@ -110,105 +90,6 @@ const ensureImage = async (image, print) => {
   print(`pulling ${image} ...`);
   const pulled = await docker(['pull', image], { timeoutMs: 1800000 });
   if (pulled.code !== 0) throw new RehearsalUsageError(`cannot pull ${image}: ${firstLines(pulled.err, 2) || `exit ${pulled.code}`}`);
-};
-
-// ── engines ──────────────────────────────────────────────────────────────────────────────────────
-
-const pgQuote = (id) => `"${id.replaceAll('"', '""')}"`;
-const pgLiteral = (s) => `'${s.replaceAll("'", "''")}'`;
-const myQuote = (id) => `\`${id.replaceAll('`', '``')}\``;
-const myLiteral = (s) => `'${s.replaceAll('\\', '\\\\').replaceAll("'", "''")}'`;
-const GEOMETRY = /^(?:geometry|point|linestring|polygon|multipoint|multilinestring|multipolygon|geometrycollection)\b/i;
-const lockList = (modes) => modes.map((m) => `'${m}'`).join(', ');
-
-const PG_LOCKS = ['AccessExclusiveLock', 'ExclusiveLock', 'ShareRowExclusiveLock', 'ShareLock'];
-const MY_LOCKS = ['EXCLUSIVE', 'SHARED_NO_WRITE', 'SHARED_NO_READ_WRITE', 'SHARED_READ_ONLY'];
-const pollSqlPg = `SELECT l.mode || E'\\t' || n.nspname || '.' || c.relname FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid JOIN pg_class c ON c.oid = l.relation JOIN pg_namespace n ON n.oid = c.relnamespace WHERE l.locktype = 'relation' AND l.granted AND c.relkind IN ('r', 'p') AND a.application_name = '${MIGRATION_APP}' AND l.mode IN (${lockList(PG_LOCKS)}) AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg\\_%';`;
-const pollSqlMysql = `SELECT CONCAT(m.LOCK_TYPE, '\\t', m.OBJECT_NAME) FROM performance_schema.metadata_locks m WHERE m.OBJECT_TYPE = 'TABLE' AND m.OBJECT_SCHEMA = '${DATABASE}' AND m.LOCK_STATUS = 'GRANTED' AND m.LOCK_TYPE IN (${lockList(MY_LOCKS)}) AND m.OWNER_THREAD_ID <> (SELECT t.THREAD_ID FROM performance_schema.threads t WHERE t.PROCESSLIST_ID = CONNECTION_ID());`;
-const pollSqlMaria = `SELECT CONCAT(REPLACE(LOCK_MODE, 'MDL_', ''), '\\t', TABLE_NAME) FROM information_schema.METADATA_LOCK_INFO WHERE TABLE_SCHEMA = '${DATABASE}' AND LOCK_MODE IN (${lockList(MY_LOCKS.map((m) => `MDL_${m}`))}) AND THREAD_ID <> CONNECTION_ID();`;
-
-// The statements a MySQL client runs: every statement ends with `;;`, so compound statements (procedures
-// from goose StatementBegin/End) keep their inner semicolons. A file that sets its own DELIMITER is sent as it is.
-export const mysqlInput = (sql, { wrap, marks }) => {
-  if (/^\s*delimiter\b/im.test(sql)) return { input: wrap ? `START TRANSACTION;\n${sql}\nCOMMIT;\n` : sql, marked: false };
-  const statements = parse(sql, { dialect: 'mysql' }).statements.map((s) => s.text);
-  const mark = (tag) => `SELECT CONCAT('@@${tag} ', UNIX_TIMESTAMP(SYSDATE(6)));;\n`;
-  const body = `DELIMITER ;;\n${marks ? mark('T0') : ''}${statements.map((s) => `${s};;\n`).join('')}${marks ? mark('T1') : ''}DELIMITER ;\n`;
-  return { input: wrap ? `START TRANSACTION;\n${body}COMMIT;\n` : body, marked: marks };
-};
-
-// One engine per run; `base(container, ...)` is the docker exec prefix up to the client's output flags.
-export const makeEngine = ({ kind, image }) => {
-  if (kind === 'postgres') {
-    const base = (c, { app } = {}) => ['exec', '-i', '-e', `PGPASSWORD=${PASSWORD}`, ...(app ? ['-e', `PGAPPNAME=${app}`] : []), c,
-      'psql', '-h', '127.0.0.1', '-U', 'postgres', '-d', DATABASE, '-X', '-q', '-A', '-t', '-F', '\t'];
-    const mark = (tag) => `SELECT '@@${tag} ' || extract(epoch from clock_timestamp());\n`;
-    return {
-      kind, image, label: 'PostgreSQL', dialect: 'postgres',
-      runArgs: ({ tmpfs }) => [...(tmpfs ? ['--tmpfs', '/var/lib/postgresql/data', '-e', 'PGDATA=/var/lib/postgresql/data/pgdata'] : []), '-e', `POSTGRES_PASSWORD=${PASSWORD}`, '-e', `POSTGRES_DB=${DATABASE}`, image, 'postgres', '-c', 'fsync=off', '-c', 'synchronous_commit=off', '-c', 'full_page_writes=off'],
-      setup: async () => null,
-      base,
-      readyArgs: (c) => [...base(c), '-c', 'SELECT 1'],
-      scriptArgs: (c, { app, stopOnError, wrap }) => [...base(c, { app }), ...(stopOnError ? ['-v', 'ON_ERROR_STOP=1'] : []), ...(wrap ? ['-1'] : []), '-f', '-'],
-      // an empty statement after the file ends a last statement that lacks its semicolon
-      scriptInput: (sql, { marks }) => ({ input: marks ? `${mark('T0')}${sql}\n;\n${mark('T1')}` : sql, marked: marks }),
-      queryArgs: (c) => [...base(c), '-v', 'ON_ERROR_STOP=1', '-f', '-'],
-      pollerArgs: (c) => [...base(c, { app: 'msafe-poller' }), '-v', 'ON_ERROR_STOP=1', '-f', '-'],
-      pollInput: () => `${pollSqlPg}\n\\echo @@END\n`,
-      errorLines: (stderr) => stderr.split(/\r?\n/).filter((l) => /\bERROR:/.test(l)),
-      // statement number only: an error text can quote row data
-      describeError: (line) => `at line ${line.match(/:(\d+): ERROR/)?.[1] ?? '?'}`,
-      metaSql: "SELECT n.nspname, c.relname, a.attname, format_type(a.atttypid, a.atttypmod) FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg\\_%' AND c.relkind IN ('r', 'p') AND a.attnum > 0 AND NOT a.attisdropped ORDER BY n.nspname, c.relname, a.attnum;",
-      tableKey: (schema, table) => (schema === 'public' ? table : `${schema}.${table}`),
-      statsSql: (key, { schema, name }, cols) => `SELECT row_to_json(x)::text FROM (SELECT ${pgLiteral(key)} AS t, count(*) AS n${cols.map((c, i) => `, count(${pgQuote(c.name)}) AS c${i}, count(DISTINCT ${pgQuote(c.name)}::text) AS d${i}, coalesce(sum(length(${pgQuote(c.name)}::text)), 0) AS l${i}, min(${pgQuote(c.name)}::text) AS lo${i}, max(${pgQuote(c.name)}::text) AS hi${i}`).join('')} FROM ${pgQuote(schema)}.${pgQuote(name)}) x;`,
-      normalizeLockTable: (t) => t.replace(/^public\./, ''),
-      shell: (c) => `docker exec -it -e PGPASSWORD=${PASSWORD} ${c} psql -h 127.0.0.1 -U postgres ${DATABASE}`,
-      probe: {
-        create: `CREATE TABLE ${PROBE_TABLE} (id int);`, drop: `DROP TABLE ${PROBE_TABLE};`,
-        hold: `BEGIN;\nLOCK TABLE ${PROBE_TABLE} IN ACCESS EXCLUSIVE MODE;\nSELECT pg_sleep(3);\nCOMMIT;\n`,
-      },
-    };
-  }
-  const maria = kind === 'mariadb';
-  const eng = {
-    kind, image, label: maria ? 'MariaDB' : 'MySQL', dialect: 'mysql', bin: 'mysql',
-    runArgs: ({ tmpfs }) => [...(tmpfs ? ['--tmpfs', '/var/lib/mysql'] : []), '-e', `${maria ? 'MARIADB' : 'MYSQL'}_ROOT_PASSWORD=${PASSWORD}`, '-e', `${maria ? 'MARIADB' : 'MYSQL'}_DATABASE=${DATABASE}`, image],
-    base: (c, extra = []) => ['exec', '-i', '-e', `MYSQL_PWD=${PASSWORD}`, c, eng.bin, '-h127.0.0.1', '-uroot', '--batch', '--raw', '--skip-column-names', '--default-character-set=utf8mb4', '-D', DATABASE, ...extra],
-    readyArgs: (c) => eng.base(c, ['-e', 'SELECT 1']),
-    scriptArgs: (c, { stopOnError }) => eng.base(c, stopOnError ? [] : ['--force']),
-    scriptInput: (sql, { wrap, marks }) => mysqlInput(sql, { wrap, marks }),
-    queryArgs: (c) => eng.base(c),
-    pollerArgs: (c) => eng.base(c, ['--unbuffered']),
-    pollInput: () => `${maria ? pollSqlMaria : pollSqlMysql}\nSELECT '@@END';\n`,
-    errorLines: (stderr) => stderr.split(/\r?\n/).filter((l) => /^ERROR \d+/.test(l)),
-    describeError: (line) => line.match(/^(ERROR \d+(?: \(\w+\))?)(?: at line (\d+))?/)?.slice(1).filter(Boolean).join(' at line ') ?? 'ERROR',
-    metaSql: `SELECT '', c.TABLE_NAME, c.COLUMN_NAME, c.COLUMN_TYPE FROM information_schema.COLUMNS c JOIN information_schema.TABLES t ON t.TABLE_SCHEMA = c.TABLE_SCHEMA AND t.TABLE_NAME = c.TABLE_NAME WHERE c.TABLE_SCHEMA = DATABASE() AND t.TABLE_TYPE = 'BASE TABLE' ORDER BY c.TABLE_NAME, c.ORDINAL_POSITION;`,
-    tableKey: (schema, table) => table,
-    statsSql: (key, { name }, cols) => `SELECT JSON_OBJECT('t', ${myLiteral(key)}, 'n', COUNT(*)${cols.map((c, i) => {
-      const v = GEOMETRY.test(c.type) ? `ST_AsText(${myQuote(c.name)})` : `CAST(${myQuote(c.name)} AS CHAR)`;
-      return `, 'c${i}', COUNT(${myQuote(c.name)}), 'd${i}', COUNT(DISTINCT ${myQuote(c.name)}), 'l${i}', COALESCE(SUM(LENGTH(${v})), 0), 'lo${i}', MIN(${v}), 'hi${i}', MAX(${v})`;
-    }).join('')}) FROM ${myQuote(name)};`,
-    normalizeLockTable: (t) => t,
-    shell: (c) => `docker exec -it ${c} ${eng.bin} -h127.0.0.1 -uroot -p${PASSWORD} ${DATABASE}`,
-    // Newer MariaDB images ship `mariadb` without the `mysql` name.
-    detect: async (c) => {
-      if (eng.binFound) return;
-      const found = await docker(['exec', c, 'sh', '-c', 'command -v mariadb || command -v mysql']);
-      if (found.code === 0 && found.out.trim()) { eng.bin = found.out.trim().split('/').pop(); eng.binFound = true; }
-    },
-    // The metadata-lock instrument is off by default in MySQL 5.7, and MariaDB reports locks through a plugin.
-    // Returns why locks cannot be read, or null.
-    setup: async (c) => {
-      const sql = maria ? "INSTALL SONAME 'metadata_lock_info'" : "UPDATE performance_schema.setup_instruments SET ENABLED = 'YES', TIMED = 'YES' WHERE NAME = 'wait/lock/metadata/sql/mdl'";
-      const r = await docker(eng.base(c, ['-e', sql]));
-      return r.code === 0 ? null : firstLines(r.err || r.out, 2);
-    },
-    probe: {
-      create: `CREATE TABLE ${PROBE_TABLE} (id int) ENGINE=InnoDB;`, drop: `DROP TABLE ${PROBE_TABLE};`,
-      hold: `LOCK TABLES ${PROBE_TABLE} WRITE;\nSELECT SLEEP(3);\nUNLOCK TABLES;\n`,
-    },
-  };
-  return eng;
 };
 
 // ── a second session that polls the lock tables while a migration runs ───────────────────────────────────
@@ -338,12 +219,12 @@ const isPgCustomDump = (file) => {
 const loadSeed = async (eng, name, file, dump, print) => {
   const gz = /\.gz$/i.test(file);
   if (dump && eng.kind === 'postgres' && !gz && isPgCustomDump(file)) {
-    const r = await docker(['exec', '-i', '-e', `PGPASSWORD=${PASSWORD}`, name, 'pg_restore', '-h', '127.0.0.1', '-U', 'postgres', '-d', DATABASE, '--no-owner', '--no-privileges'], { stream: createReadStream(file), timeoutMs: 3600000 });
+    const r = await docker(eng.restoreArgs(name), { stream: createReadStream(file), timeoutMs: 3600000 });
     const errors = r.err.split(/\r?\n/).filter((l) => /error/i.test(l));
     if (r.code !== 0 || errors.length) print(`seed: pg_restore exited ${r.code} with ${errors.length} error line(s)`);
     return;
   }
-  const args = eng.scriptArgs(name, { app: 'msafe-seed', stopOnError: !dump, wrap: false });
+  const args = eng.scriptArgs(name, { app: SEED_APP, stopOnError: !dump, wrap: false });
   let r;
   if (dump) r = await docker(args, { stream: gz ? createReadStream(file).pipe(createGunzip()) : createReadStream(file), timeoutMs: 3600000 });
   else {
@@ -419,7 +300,7 @@ export const rehearseDocker = async (opts, print) => {
       if (!seen) await sleep(100);
     }
     await holder;
-    await docker(eng.scriptArgs(name, { app: 'msafe-seed', stopOnError: true, wrap: false }), { input: eng.probe.drop });
+    await docker(eng.scriptArgs(name, { app: SEED_APP, stopOnError: true, wrap: false }), { input: eng.probe.drop });
     if (!seen) throw new RehearsalUsageError(`lock measurement failed its self-test: a lock held on a probe table was not seen by the polling session (${poller.state.error ?? setupError ?? (poller.state.died ? 'the polling session ended' : 'no row returned')}); nothing was measured, so nothing is reported`);
 
     let failed = 0;
@@ -486,7 +367,7 @@ export const rehearseDocker = async (opts, print) => {
     poller?.stop();
     if (opts.keep && finished) {
       live.delete(name);
-      print(`container ${name} kept for inspection (password ${PASSWORD}, no network: use docker exec).\n  connect: ${eng.shell(name)}\n  remove:  docker rm -f -v ${name}`);
+      print(`container ${name} kept for inspection (password ${eng.password}, no network: use docker exec).\n  connect: ${eng.shell(name)}\n  remove:  docker rm -f -v ${name}`);
     } else {
       await docker(['rm', '-f', '-v', name], { timeoutMs: 120000 }).catch(() => {});
       live.delete(name);
