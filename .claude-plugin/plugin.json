@@ -1,7 +1,7 @@
 {
   "name": "migrations-safe",
-  "version": "1.0.0",
-  "description": "Write and review database schema migrations that do not lose data, break running code or lock a busy table: a migration linter, git history checks and a SQLite rehearsal.",
+  "version": "1.1.0",
+  "description": "Write and review database schema migrations that do not lose data, break running code or lock a busy table: a migration linter, git history checks and a rehearsal on SQLite or a throwaway PostgreSQL, MySQL or MariaDB container.",
   "license": "MIT",
   "author": { "name": "Nahuel Mosse" }
 }

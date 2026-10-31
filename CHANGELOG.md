@@ -1,5 +1,39 @@
 # Changelog
 
+## 1.1.0
+
+MySQL and MariaDB at the depth of PostgreSQL, and rehearsal on real servers.
+
+- `migration-lint` has `mysql-*` rules built from the MySQL 8.0/8.4 online DDL tables and the MariaDB
+  instant-ALTER documentation: explicit `ALGORITHM` an operation or server version cannot honour
+  (`mysql-algorithm-unsupported`), missing `lock_wait_timeout` (`mysql-lock-wait-timeout`), foreign keys with
+  `foreign_key_checks=1` and the implicit index they build (`mysql-add-foreign-key`, `mysql-fk-implicit-index`),
+  FULLTEXT and SPATIAL indexes, dropping or adding a primary key, charset and collation conversion, ENUM/SET
+  changes (append is instant, reorder or storage growth copies), `OPTIMIZE`/`FORCE`/`ENGINE=InnoDB`
+  rebuilds, column position, the 64 instant row versions per table, and `CHANGE COLUMN` used to rename.
+  Messages name gh-ost or pt-online-schema-change for tables too big for `ALTER`.
+- `--mysql-version` (`8.0` default, `8.0.28`, `8.4`, `5.7`, `mariadb-10.6`) selects version-dependent behaviour;
+  without it the version is read from a compose file, CI workflow or `.tool-versions` next to the migrations
+  when they agree, and a `note:` line says which one was used.
+- `references/mysql.md` lists what runs online per operation, metadata-lock behaviour and the limits of gh-ost
+  and pt-online-schema-change; `fixtures/good/mysql` and `fixtures/bad/mysql` exercise the rules.
+- `rehearse` (also `rehearse-sqlite`) takes `--engine postgres:<tag>|mysql:<tag>|mariadb:<tag>`. It starts a
+  throwaway container (`msafe-rehearse-*`, data in memory by default), reaches it only with `docker exec`,
+  loads a `.sql` seed or `--dump` (pg_dump plain or custom format, mysqldump, `.gz`), applies migrations in
+  order with the runner's transaction wrapping and down sections, and reports per migration the duration, the
+  write-blocking locks held (`pg_locks`, `performance_schema.metadata_locks`, MariaDB `METADATA_LOCK_INFO`,
+  polled from a second session), and the row and column-fingerprint diff. Durations are taken inside the
+  server. `--down` runs up, down, up and compares the schema with the seed. A lock held longer than
+  `--lock-budget` (default 2s) fails the run. Lock measurement is proven first with a probe lock (MySQL 5.7's
+  disabled instrument is switched on; exit 2 if it still cannot be seen), and a migration whose polling
+  session failed is reported `UNMEAS.` and fails the run instead of claiming no lock. PostgreSQL snapshots
+  cover every schema; `.sql.gz` seeds are unpacked; a seed or dump that leaves no tables is exit 2.
+  The container has no network and is removed on success, failure, SIGINT and SIGTERM (exit 130, 143);
+  `--keep` leaves it and prints how to remove it. A hard kill leaves it, and the next run removes containers
+  whose process is gone. Exit 2 when docker is missing, its daemon does not answer or the image cannot be pulled.
+- Docker rehearsal tests run when docker is available and report `skipped: docker not available` otherwise;
+  CI has a Linux job that runs them against `postgres:16` and `mysql:8.4`.
+
 ## 1.0.0
 
 First release as a Claude Code plugin.

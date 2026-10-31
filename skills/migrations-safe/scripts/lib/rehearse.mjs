@@ -44,7 +44,7 @@ const snapshot = (db) => {
 const orphanKeys = (db) => new Set(db.prepare('PRAGMA foreign_key_check').all().map((r) => `${r.table}|${r.rowid}|${r.parent}|${r.fkid}`));
 
 // What changed between two snapshots: lines to print, and the losses among them.
-const diff = (before, after, kind, allowLoss) => {
+export const diff = (before, after, kind, allowLoss) => {
   const lines = [];
   const lost = [];
   const allowed = (t, c) => allowLoss.has(t) || (c && allowLoss.has(`${t}.${c}`));
@@ -85,8 +85,8 @@ const diff = (before, after, kind, allowLoss) => {
   return { lines, lost };
 };
 
-const partFor = (file, kind) => {
-  const parsed = parse(decodeSql(readFileSync(file)), { dialect: 'sqlite' });
+export const partFor = (file, kind, dialect = 'sqlite') => {
+  const parsed = parse(decodeSql(readFileSync(file)), { dialect });
   if (kind === 'up') return { sql: parsed.upSql, markers: parsed.markers, statements: parsed.statements.length };
   return { sql: parsed.hasDownSection ? parsed.downSql : parsed.upSql, markers: parsed.markers, statements: parsed.statements.length, hasDown: parsed.hasDownSection };
 };

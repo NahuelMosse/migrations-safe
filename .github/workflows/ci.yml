@@ -17,6 +17,9 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
         node: ['22.13', '24']
     runs-on: ${{ matrix.os }}
+    env:
+      # the Docker rehearsal tests have their own Linux job below
+      MSAFE_DOCKER_TESTS: '0'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -46,6 +49,43 @@ jobs:
           code=0
           node $S/scripts/rehearse-sqlite.mjs $S/fixtures/seed-sqlite.sql $S/fixtures/bad/sqlite-rebuild/0009_tasks_drop_priority.sql > /dev/null || code=$?
           if [ "$code" -ne 1 ]; then echo "the lossy rebuild must exit 1, got $code"; exit 1; fi
+
+  docker-rehearsal:
+    timeout-minutes: 30
+    runs-on: ubuntu-latest
+    env:
+      MSAFE_REQUIRE_DOCKER: '1'
+      # mysql:5.7 ships the metadata-lock instrument disabled; mariadb needs its metadata_lock_info plugin
+      MSAFE_DOCKER_ENGINES: postgres:16,mysql:8.4,mysql:5.7,mariadb:11
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Pull the engines
+        run: |
+          docker pull postgres:16
+          docker pull mysql:8.4
+          docker pull mysql:5.7
+          docker pull mariadb:11
+          docker pull alpine:latest
+      - name: Docker rehearsal tests
+        run: node --test test/rehearse-docker.test.mjs
+      - name: Rehearse the seeds on PostgreSQL and MySQL
+        run: |
+          S=skills/migrations-safe
+          printf 'ALTER TABLE orders ADD COLUMN due_on date;\n' > /tmp/pg-add.sql
+          printf 'ALTER TABLE orders ADD COLUMN due_on date NULL, ALGORITHM=INSTANT;\n' > /tmp/my-add.sql
+          node $S/scripts/rehearse.mjs --engine postgres:16 $S/fixtures/seed-postgres.sql /tmp/pg-add.sql
+          node $S/scripts/rehearse.mjs --engine mysql:8.4 $S/fixtures/seed-mysql.sql /tmp/my-add.sql
+          node $S/scripts/rehearse.mjs --engine mariadb:11 $S/fixtures/seed-mysql.sql /tmp/my-add.sql
+          printf 'ALTER TABLE orders ADD COLUMN due_on date NULL;\n' > /tmp/my57-add.sql
+          node $S/scripts/rehearse.mjs --engine mysql:5.7 $S/fixtures/seed-mysql.sql /tmp/my57-add.sql
+      - name: No rehearsal container is left behind
+        if: always()
+        run: |
+          left=$(docker ps -aq --filter name=msafe-rehearse-)
+          if [ -n "$left" ]; then echo "containers left behind:"; docker ps -a --filter name=msafe-rehearse-; exit 1; fi
 
   validate:
     timeout-minutes: 10

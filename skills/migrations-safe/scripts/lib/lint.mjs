@@ -4,10 +4,11 @@ import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'n
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import { UsageError } from './errors.mjs';
 import { HistoryError, historyFindings, isMigrationFile } from './history.mjs';
-import { decodeSql, parse } from './parse.mjs';
+import { decodeSql, flat, parse } from './parse.mjs';
 import { ERROR, WARN, lintSql } from './rules.mjs';
-import { PROFILES, RUNNER_IDS, DIALECTS, detectRunner, profileOf, projectDialect, runnerFromMarkers, sniffDialect } from './runners.mjs';
+import { PROFILES, RUNNER_IDS, DIALECTS, detectRunner, fileDialectDirective, profileOf, projectDialect, runnerFromMarkers, sniffDialect } from './runners.mjs';
 import { applySql, cloneSchema } from './schema.mjs';
+import { DEFAULT_MYSQL_VERSION, learnStatement, mysqlVersionOrThrow, parseMysqlVersion, projectMysqlVersion } from './mysql.mjs';
 
 export { UsageError };
 
@@ -31,7 +32,7 @@ const hasDownSibling = (file) => {
 };
 
 // Schema of the tables as earlier migrations of the same folder left them.
-const createSchemaSource = (seed) => {
+const createSchemaSource = (seed, learn) => {
   const groups = new Map();
   const groupFiles = (file) => {
     if (/^migration\.sql$/i.test(basename(file))) {
@@ -51,18 +52,20 @@ const createSchemaSource = (seed) => {
     for (; state.i < idx; state.i++) {
       const sql = decodeSql(readFileSync(files[state.i]));
       applySql(state.schema, sql, sniffDialect(sql));
+      learn(sql, files[state.i]);
     }
     return cloneSchema(state.schema);
   };
 };
 
-export const loadSchemaSeed = (paths) => {
+export const loadSchemaSeed = (paths, learn = () => {}) => {
   const seed = new Map();
   for (const p of paths) {
     if (!existsSync(p)) throw new UsageError(`--schema ${p} does not exist`);
     for (const f of sqlFiles(p).filter((x) => !isDownFile(x))) {
       const sql = decodeSql(readFileSync(f));
       applySql(seed, sql, sniffDialect(sql));
+      learn(sql);
     }
   }
   return seed;
@@ -129,8 +132,19 @@ export const lintTargets = (opts) => {
     }
   }
 
-  const seed = loadSchemaSeed(opts.schema ?? []);
-  const schemaOf = createSchemaSource(seed);
+  const requestedVersion = opts.mysqlVersion ? mysqlVersionOrThrow(opts.mysqlVersion) : null;
+  const versionOfDir = new Map();
+  // What earlier files and --schema files taught about ENUMs, indexes, column types and instant row versions.
+  const shared = { instantVersions: new Map(), enums: new Map(), indexed: new Map(), defs: new Map() };
+  const serverNow = { v: requestedVersion ?? parseMysqlVersion(DEFAULT_MYSQL_VERSION) };
+  const linted = new Set(); // files the rules already learned from, so replaying them would count twice
+  const learn = (sql, file) => {
+    if (file && linted.has(file)) return;
+    if ((fileDialectDirective(sql) ?? sniffDialect(sql)) !== 'mysql') return;
+    for (const s of parse(sql, { dialect: 'mysql' }).statements) learnStatement(flat(s.text), shared, serverNow.v);
+  };
+  const seed = loadSchemaSeed(opts.schema ?? [], learn);
+  const schemaOf = createSchemaSource(seed, learn);
   const createdBefore = new Set();
   const dialectOfDir = new Map();
   for (const input of inputs) {
@@ -138,11 +152,26 @@ export const lintTargets = (opts) => {
     const detected = input.file ? detectRunner(input.file, { markers, fileName: basename(input.file) }) : (runnerFromMarkers(markers) ?? { id: 'raw' });
     const profile = profileOf(opts.runner ?? detected.id);
     if (input.file && !dialectOfDir.has(dirname(input.file))) dialectOfDir.set(dirname(input.file), projectDialect(input.file)?.dialect);
+    if (input.file && !versionOfDir.has(dirname(input.file))) versionOfDir.set(dirname(input.file), projectMysqlVersion(dirname(input.file)));
+    const declared = input.file ? versionOfDir.get(dirname(input.file)) : null;
+    const mysqlVersion = requestedVersion ?? declared?.version ?? parseMysqlVersion(DEFAULT_MYSQL_VERSION);
+    serverNow.v = mysqlVersion;
+    const schema = input.file ? schemaOf(input.file) : cloneSchema(seed);
+    if (input.file) linted.add(input.file);
     const r = lintSql(input.sql, {
       dialect: opts.dialect, projectDialect: input.file ? dialectOfDir.get(dirname(input.file)) : undefined, profile,
-      schema: input.file ? schemaOf(input.file) : cloneSchema(seed), createdBefore,
+      schema, createdBefore,
       generated: !input.file, noTransaction: input.file ? flywayNoTransaction(input.file) : false,
+      mysqlVersion, ...shared,
     });
+    if (r.dialect === 'mysql') {
+      const note = `MySQL rules assume ${mysqlVersion.label} (${requestedVersion ? '--mysql-version' : declared ? declared.evidence : `default, pass --mysql-version to change it`})`;
+      if (!notes.includes(note)) notes.push(note);
+      if (!requestedVersion && declared?.conflict) {
+        const warning = `the server versions declared next to the migrations disagree (${declared.conflict.join(', ')}): using the oldest, ${mysqlVersion.label}, so the rules hold on every one of them — pass --mysql-version to choose`;
+        if (!notes.includes(warning)) notes.push(warning);
+      }
+    }
     if (!input.file && r.statements === 0) throw new UsageError('stdin held no SQL statements, so nothing was checked');
     if (input.file && fresh.has(input.file)) r.createdTables.forEach((t) => createdBefore.add(t));
     findings.push(...r.findings.map((f) => ({ ...f, file: input.label })));

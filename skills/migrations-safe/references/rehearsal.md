@@ -37,20 +37,69 @@ wrapped file shows the cascade deletes it would cause in production.
 
 Exit 0 all ran and nothing was lost, 1 a migration failed or lost data, 2 could not run.
 
-## PostgreSQL and MySQL
+## PostgreSQL, MySQL and MariaDB (Docker)
 
-Same engine and major version as production, never SQLite as a stand-in.
+Same engine and version as production, never SQLite as a stand-in.
 
-1. Restore a recent backup, or an anonymised subset of the largest tables, into a throwaway database
-   (`pg_restore -d rehearsal latest.dump`, `createdb -T prod_copy rehearsal`). The data must hold the
-   cases that break DDL: NULLs, duplicates, orphans, the longest values, the maximum ids.
-2. Check out main's last state and migrate, then switch to the branch and apply only the new migrations
-   (the upgrade path, not a fresh install).
-3. Measure duration and locks: `\timing`, and in another session
-   `SELECT pid, mode, granted, query FROM pg_locks JOIN pg_stat_activity USING (pid) WHERE relation = 't'::regclass;`.
-   Anything holding `AccessExclusiveLock` longer than the lock timeout fails the rehearsal.
-4. Run main's test suite (the N-1 code) against the migrated schema: that is the rolling-deploy check.
-5. Run the down, then up again, if the migration claims to be reversible.
+```bash
+node "${CLAUDE_SKILL_DIR}/scripts/rehearse.mjs" --engine postgres:16 seed.sql 0007.up.sql 0008.up.sql
+node "${CLAUDE_SKILL_DIR}/scripts/rehearse.mjs" --engine mysql:8.4 --dump subset.sql.gz 0007.sql --down --lock-budget 1s
+node "${CLAUDE_SKILL_DIR}/scripts/rehearse.mjs" --engine mariadb:11 seed.sql 0007.sql --keep
+```
 
-In CI: the engine as a pinned container, `migrate up`, `down`, `up` on an empty and on a seeded database,
-and the linter (or squawk, Atlas lint, strong_migrations) as a required check.
+Needs only the `docker` CLI: the database is reached with `docker exec <container> psql|mysql`, no port is
+published, and nothing but the standard images is used. The container is named `msafe-rehearse-<pid>-<id>`,
+started fresh with no network, and removed at the end, also when a migration fails, the run errors, or it gets
+Ctrl+C or SIGTERM (exit 130 and 143). A hard kill (TerminateProcess, `Stop-Process`, a CI cancel, an IDE stop)
+cannot be caught and leaves the container; every start removes `msafe-rehearse-*` containers whose process is
+gone. `--keep` leaves it running after a run that finished and prints `docker exec` and `docker rm -f -v` lines.
+Exit 2: docker is not installed, its daemon does not answer, the image cannot be pulled, the seed does not
+load, bad arguments. An image that is not present is pulled first; it is left in the local cache.
+
+**Seed.** A `.sql` or `.sql.gz` file loads strictly: any error is exit 2. `--dump <file>` takes `pg_dump`
+output (plain or custom format) or `mysqldump` output, `.gz` allowed, goes before the migrations, and tolerates
+errors, counting them (`ALTER ... OWNER`, missing roles and extensions are common in a scratch server); only
+the line and error code of the first one are printed, since an error text can quote rows. A seed or dump that
+leaves no tables is exit 2. A `pg_restore` that exits non-zero is reported but not fatal while tables were loaded. The data must hold the cases that break DDL:
+NULLs, duplicates, orphans, the longest values, the maximum ids. The data directory is kept in memory (fast
+start and load) for seeds up to 256 MB; `--disk` or a bigger seed uses the container's disk.
+
+**What runs.** The runner is detected from the first migration (`--runner` overrides). A file is wrapped in
+a transaction when the runner does that (`psql --single-transaction`; `START TRANSACTION ... COMMIT` for MySQL,
+whose DDL commits implicitly anyway), so `CREATE INDEX CONCURRENTLY` in a wrapped file fails as it would in
+production. A failed migration stops the run; the rest is `SKIPPED`. With `--down` the downs run in reverse,
+then the ups again, and the tables and columns are compared with the seed.
+
+**What is measured.**
+
+- Duration of each migration, taken inside the server between two timestamps of the same session
+  (`clock_timestamp()`, `SYSDATE(6)`), so the `docker exec` round trip is not in it; a file that sets its own
+  MySQL `DELIMITER` is timed from outside, minus the round trip.
+- Locks: a second session polls while the migration runs (the output says the measured interval, about
+  50 ms). Before the first migration the tool proves the measurement works: another session holds a lock on a
+  probe table for 3 s and the polling session must see it, otherwise exit 2 (MySQL 5.7 ships the metadata-lock
+  instrument disabled, so it is switched on first; MariaDB needs its `metadata_lock_info` plugin). During a
+  run, a polling session that reports an error, ends, or returns too few polls for the length of a migration
+  makes that migration `UNMEAS.`: its locks are unknown, the run fails, and "no lock" is never printed.
+  A lock on several modes of one table is one line (`AccessExclusiveLock + ShareLock on t`). PostgreSQL: `pg_locks` joined with
+  `pg_stat_activity` for the migration's session, modes that block writes (`AccessExclusiveLock`,
+  `ExclusiveLock`, `ShareRowExclusiveLock`, `ShareLock`). MySQL: `performance_schema.metadata_locks`
+  (`EXCLUSIVE`, `SHARED_NO_WRITE`, `SHARED_NO_READ_WRITE`, `SHARED_READ_ONLY`). MariaDB:
+  `information_schema.METADATA_LOCK_INFO` from its `metadata_lock_info` plugin. The time a lock is held is
+  first to last poll plus one poll interval, so a lock shorter than the interval may not be seen, and the numbers
+  are those of an idle scratch server: on a loaded one, waits behind other transactions come on top. Only
+  tables that existed before the migration are reported. A lock held longer than `--lock-budget` (default
+  2s; `500ms`, `2s`) is a failure (`LOCKED`).
+- Per table the rows, and per column the type, the non-NULL count and a fingerprint (distinct values, total
+  length, smallest and largest value as text). The same rules as SQLite decide what is a loss: a dropped
+  table or column that held data, a row count that went down, a non-NULL count that went down; a dropped
+  column that reappears under another name with the same fingerprint is reported as `renamed ...?`.
+  `--allow-loss tasks.priority,audit` marks intended losses. PostgreSQL: every schema except the system ones
+  (a table outside `public` is named `schema.table`); MySQL: the `rehearsal` database. Foreign-key orphans are
+  not checked because the engine enforces its constraints.
+
+Not covered: waits behind other transactions (the scratch server has none), replication lag, and the N-1
+code's tests: run main's test suite against the migrated schema yourself (`--keep` leaves the database).
+
+In CI: `--engine postgres:<tag>` and `mysql:<tag>` with the same tags as production, a seed in the repository,
+`--down` for reversible migrations, and the linter (or squawk, Atlas lint, strong_migrations) as a required check.

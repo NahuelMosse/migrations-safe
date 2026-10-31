@@ -6,7 +6,7 @@
     {
       "name": "migrations-safe",
       "source": "./",
-      "description": "Migration linter, git history checks and SQLite rehearsal, with a skill that guides the fixes."
+      "description": "Migration linter, git history checks and rehearsal on SQLite or Docker PostgreSQL, MySQL and MariaDB, with a skill that guides the fixes."
     }
   ]
 }

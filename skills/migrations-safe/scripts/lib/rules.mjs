@@ -3,6 +3,8 @@
 import { DIALECTS, fileDialectDirective, profileOf, sniffDialect, wrapsFile } from './runners.mjs';
 import { flat, ident, name, parse, splitTopLevel, stripLiterals } from './parse.mjs';
 import { applySchema, cloneSchema, insertTargets, parseAlter } from './schema.mjs';
+import { DEFAULT_MYSQL_VERSION, INDEX_STATEMENT, enumOf, learnStatement, parseMysqlVersion } from './mysql.mjs';
+import { GOT, mysqlAlterRules as mysqlRules } from './mysql-rules.mjs';
 
 export const ERROR = 'error';
 export const WARN = 'warning';
@@ -30,6 +32,19 @@ export const RULES = [
   { id: 'volatile-default', level: ERROR, area: 'lock' },
   { id: 'rewriting-column', level: ERROR, area: 'lock' },
   { id: 'mysql-no-algorithm', level: WARN, area: 'lock' },
+  { id: 'mysql-algorithm-unsupported', level: ERROR, area: 'lock' },
+  { id: 'mysql-lock-wait-timeout', level: WARN, area: 'lock' },
+  { id: 'mysql-add-foreign-key', level: ERROR, area: 'lock' },
+  { id: 'mysql-fk-implicit-index', level: WARN, area: 'lock' },
+  { id: 'mysql-fulltext-spatial-index', level: ERROR, area: 'lock' },
+  { id: 'mysql-drop-primary-key', level: ERROR, area: 'lock' },
+  { id: 'mysql-add-primary-key', level: WARN, area: 'lock' },
+  { id: 'mysql-charset-conversion', level: ERROR, area: 'lock' },
+  { id: 'mysql-enum-change', level: ERROR, area: 'lock' },
+  { id: 'mysql-table-rebuild', level: WARN, area: 'lock' },
+  { id: 'mysql-column-position', level: WARN, area: 'lock' },
+  { id: 'mysql-instant-row-versions', level: WARN, area: 'lock' },
+  { id: 'mysql-change-column-rename', level: WARN, area: 'running code' },
   { id: 'missing-lock-timeout', level: WARN, area: 'lock' },
   { id: 'concurrently-in-transaction', level: ERROR, area: 'transaction' },
   { id: 'transaction-conflict', level: WARN, area: 'transaction' },
@@ -51,6 +66,8 @@ const NOT_COLUMN_DROP = /^drop (?:constraint|index|key|default|not null|primary|
 const NON_DDL = /^(?:begin|start transaction|commit|set\b|pragma\b|select\b)/i;
 const TX_START =/^(?:begin|start transaction)\b/i;
 const LOCK_TIMEOUT = /^(?:set\s+(?:session\s+|local\s+)?lock_timeout\b|select\s+set_config\s*\(\s*'lock_timeout')/i;
+const MYSQL_LOCK_WAIT = /^(?:set\s+(?:session\s+|local\s+|@@session\.|@@local\.|@@)?lock_wait_timeout\s*=|set\s+statement\b.*\block_wait_timeout\s*=)/i;
+const FK_CHECKS = /^set\s+(?:session\s+|@@session\.|@@)?foreign_key_checks\s*=\s*(0|1|on|off|true|false)\b/i;
 const TABLE_ALL = String.raw`(?:only )?(${ident})`;
 
 const unbounded = (bare, { nullChecks }) => {
@@ -105,6 +122,15 @@ export const lintSql = (sql, ctx = {}) => {
   const requested = ctx.dialect ?? fileDialectDirective(sql) ?? ctx.projectDialect;
   const dialect = DIALECTS.includes(requested) ? requested : sniffDialect(sql);
   const pg = dialect === 'postgres';
+  const my = dialect === 'mysql';
+  const mysqlVersion = ctx.mysqlVersion ?? parseMysqlVersion(DEFAULT_MYSQL_VERSION);
+  // State that outlives one file: instant row versions, ENUM definitions and indexed columns per table.
+  const instantVersions = ctx.instantVersions ?? new Map();
+  const enums = ctx.enums ?? new Map();
+  const indexed = ctx.indexed ?? new Map();
+  const defs = ctx.defs ?? new Map();
+  const maps = { enums, indexed, defs, instantVersions };
+  let fkChecksOff = false;
   const profile = ctx.profile ?? profileOf('raw');
   const parsed = parse(sql, { dialect });
   const { statements, hasDownSection, markers } = parsed;
@@ -150,10 +176,16 @@ export const lintSql = (sql, ctx = {}) => {
     }));
   }
 
+  const mysqlAlterRules = (k, table, actions) => mysqlRules({
+    add: (rule, message, extra) => add(k, rule, message, extra), table, actions, version: mysqlVersion, fkChecksOff,
+    state: { enums, indexed, defs, instantVersions },
+  });
+
   const alterRules = (k, table, actions, text) => {
     const existing = isExisting(table);
+    if (my && existing) mysqlAlterRules(k, table, actions);
     if (dialect === 'mysql' && !/\balgorithm\s*=/i.test(text))
-      add(k, 'mysql-no-algorithm', `ALTER TABLE ${table} without ALGORITHM/LOCK may copy the table under lock: declare ALGORITHM=INSTANT|INPLACE, LOCK=NONE so it fails instead; for a COPY on a big table use gh-ost`);
+      add(k, 'mysql-no-algorithm', `ALTER TABLE ${table} without ALGORITHM/LOCK may copy the table under lock: declare ALGORITHM=INSTANT (alone, it takes no LOCK clause) or ALGORITHM=INPLACE, LOCK=NONE so it fails instead; for a COPY on a big table use gh-ost`);
     for (const a of actions) {
       let m;
       if (/^drop column\b/i.test(a) || (/^drop\s+\S/i.test(a) && !NOT_COLUMN_DROP.test(a)))
@@ -164,7 +196,7 @@ export const lintSql = (sql, ctx = {}) => {
         add(k, 'rename-column', `renames a column of ${table} in one step: the code in production still uses the old name — expand (add new, write both, backfill), switch reads, contract later`);
       if (existing && (/^rename (?:to|as)\b/i.test(a) || /^set schema\b/i.test(a)) && !rebuilt(renamedTo.get(table)))
         add(k, 'rename-table', `${/^set schema/i.test(a) ? 'moves' : 'renames'} table ${table} in one step: create the new one (or a view with the old name) and move readers first`);
-      if (/^alter (?:column )?\S+ (?:set data )?type\b/i.test(a) || (dialect === 'mysql' && /^(?:modify|change) (?:column )?\w/i.test(a)))
+      if (/^alter (?:column )?\S+ (?:set data )?type\b/i.test(a) || (dialect === 'mysql' && /^(?:modify|change) (?:column )?\w/i.test(a) && !enumOf(a)))
         add(k, 'change-column-type', `changes a column type of ${table}: can rewrite the table under an exclusive lock and break readers — new column, backfill, switch, drop later (widening varchar(n) or varchar→text is the safe exception: allow it with a reason)`);
 
       const addMatch = a.match(/^add (?:column )?(?:if not exists )?(.*)$/is);
@@ -210,13 +242,44 @@ export const lintSql = (sql, ctx = {}) => {
   let reportedPragma = false;
   texts.forEach((t, k) => {
     const b = bare[k];
+    const fkSwitch = t.match(FK_CHECKS);
+    if (fkSwitch) fkChecksOff = /^(?:0|off|false)$/i.test(fkSwitch[1]);
     const create = t.match(new RegExp(String.raw`^create (?:temp(?:orary)? |unlogged )?table (?:if not exists )?(${ident})`, 'i'));
-    if (create) { created.add(name(create[1])); createdHere.add(name(create[1])); applySchema(tables, t); return; }
+    if (create) {
+      created.add(name(create[1])); createdHere.add(name(create[1])); applySchema(tables, t);
+      if (my) learnStatement(t, maps, mysqlVersion);
+      return;
+    }
 
     const alter = parseAlter(t);
     if (alter) {
       alterRules(k, alter.table, alter.actions, t);
       if (isExisting(alter.table) && firstLock === -1) firstLock = k;
+      if (alter.wait && lockTimeoutAt === -1) lockTimeoutAt = k;
+      if (my && !isExisting(alter.table)) learnStatement(t, maps, mysqlVersion);
+    }
+    if (my) {
+      const optimize = t.match(new RegExp(String.raw`^optimize (?:(?:no_write_to_binlog|local) )?table (.*)$`, 'i'));
+      for (const raw of optimize ? splitTopLevel(optimize[1]) : []) {
+        const table = name(raw);
+        if (!isExisting(table)) continue;
+        instantVersions.set(table, 0);
+        if (firstLock === -1) firstLock = k;
+        add(k, 'mysql-table-rebuild', `OPTIMIZE TABLE rebuilds ${table} (online for InnoDB, but it copies every page, doubles disk use, replays serially on replicas and waits for metadata locks at both ends); it takes no ALGORITHM or LOCK clause — run it off-peak under SET SESSION lock_wait_timeout, or rebuild with ${GOT}`);
+      }
+      const myIndex = t.match(INDEX_STATEMENT);
+      if (myIndex) {
+        const table = name(myIndex[1]);
+        const kind = t.match(/^create (fulltext|spatial) index/i)?.[1];
+        learnStatement(t, maps, mysqlVersion);
+        if (isExisting(table) && firstLock === -1) firstLock = k;
+        if (isExisting(table) && kind)
+          add(k, 'mysql-fulltext-spatial-index', `${kind.toUpperCase()} index on ${table} blocks writes while it builds (LOCK=NONE is not allowed): build it on a shadow table with ${GOT}, or accept the window with a recorded reason`);
+      }
+      const dropIndex = t.match(new RegExp(String.raw`^drop index \S+ on (${ident})`, 'i'));
+      if (dropIndex && isExisting(name(dropIndex[1])) && firstLock === -1) firstLock = k;
+      const renameTables = t.match(/^rename table (.*)$/i);
+      if (renameTables && firstLock === -1 && isExisting(name(renameTables[1].split(/\s+to\s+/i)[0]))) firstLock = k;
     }
 
     const drop = t.match(new RegExp(String.raw`^drop table (?:if exists )?(.*)$`, 'i'));
@@ -263,9 +326,14 @@ export const lintSql = (sql, ctx = {}) => {
       reportedPragma = true;
       add(k, 'transaction-conflict', `PRAGMA foreign_keys is a no-op inside the transaction ${profile.label} wraps around the file, so DROP TABLE still runs ON DELETE CASCADE / SET NULL on child rows. Run the rebuild in the runner's no-transaction mode, where foreign_keys=OFF takes effect (PRAGMA defer_foreign_keys only helps plain NO ACTION foreign keys), and rehearse it with real child rows`, { level: copiedFrom.size ? ERROR : WARN });
     }
-    if (LOCK_TIMEOUT.test(t) && lockTimeoutAt === -1) lockTimeoutAt = k;
+    if ((my ? MYSQL_LOCK_WAIT : LOCK_TIMEOUT).test(t) && lockTimeoutAt === -1) lockTimeoutAt = k;
     applySchema(tables, t);
   });
+
+  if (my && firstLock !== -1 && (lockTimeoutAt === -1 || lockTimeoutAt > firstLock))
+    add(firstLock, 'mysql-lock-wait-timeout', lockTimeoutAt === -1
+      ? `DDL on an existing table without SET SESSION lock_wait_timeout: the statement waits for the table's metadata lock behind any open transaction (even an idle one) and every later query on the table queues behind it — SET SESSION lock_wait_timeout = 5 (MariaDB also accepts \`WAIT 5\` on the ALTER) and retry with backoff`
+      : 'lock_wait_timeout is set after the first DDL on an existing table, so that statement waits for its lock without a limit: move the SET before it', { line: statements[firstLock].line });
 
   if (pg && firstLock !== -1 && (lockTimeoutAt === -1 || lockTimeoutAt > firstLock))
     add(firstLock, 'missing-lock-timeout', lockTimeoutAt === -1
