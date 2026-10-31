@@ -4,13 +4,13 @@ import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { gzipSync } from 'node:zlib';
-import { SIGNAL_EXIT, locksIn, makeEngine, mysqlInput, parseDuration, parseEngine, seedBytes } from '../skills/migrations-safe/scripts/lib/rehearse-docker.mjs';
+import { OWNER, SIGNAL_EXIT, bootIdOf, locksIn, makeEngine, mysqlInput, ownerOf, parseDuration, parseEngine, seedBytes } from '../skills/migrations-safe/scripts/lib/rehearse-docker.mjs';
 import { FIXTURES, REHEARSE_ANY, put, scratch } from './helpers.mjs';
 
 // ── unit tests: no docker needed ─────────────────────────────────────────────────────────────────
 
 const cli = (args, { env, cwd } = {}) => {
-  const r = spawnSync(process.execPath, [REHEARSE_ANY, ...args], { encoding: 'utf8', env: env ?? process.env, cwd, windowsHide: true, timeout: 600000 });
+  const r = spawnSync(process.execPath, [REHEARSE_ANY, ...args], { encoding: 'utf8', env: env ?? process.env, cwd, windowsHide: true, timeout: 1500000 });
   return { code: r.status, out: r.stdout, err: r.stderr };
 };
 
@@ -37,7 +37,7 @@ test('--engine and --lock-budget values are parsed and validated', () => {
   assert.deepEqual(parseEngine('postgres:16'), { kind: 'postgres', tag: '16', image: 'postgres:16' });
   assert.equal(parseEngine('mariadb:11.4').image, 'mariadb:11.4');
   assert.equal(parseEngine('mysql:8.4').kind, 'mysql');
-  for (const bad of ['postgres', 'oracle:19', 'mysql:', '']) assert.throws(() => parseEngine(bad), /--engine takes/);
+  for (const bad of ['postgres', 'nosuch:1', 'mysql:', '']) assert.throws(() => parseEngine(bad), /--engine takes/);
   assert.equal(parseDuration('2'), 2000);
   assert.equal(parseDuration('2s'), 2000);
   assert.equal(parseDuration('500ms'), 500);
@@ -55,7 +55,7 @@ test('server-engine arguments are validated before docker is touched: exit 2', (
   const dir = scratch(t);
   const up = put(dir, '0001.sql', 'SELECT 1;\n');
   const noDocker = { env: onlyPath(scratch(t)) };
-  assert.equal(cli(['--engine', 'oracle:19', PG_SEED, up], noDocker).code, 2);
+  assert.equal(cli(['--engine', 'nosuch:1', PG_SEED, up], noDocker).code, 2);
   assert.equal(cli(['--engine', 'postgres:16', PG_SEED], noDocker).code, 2);
   assert.equal(cli(['--engine', 'postgres:16', PG_SEED, join(dir, 'missing.sql')], noDocker).code, 2);
   assert.equal(cli(['--engine', 'postgres:16', PG_SEED, up, '--lock-budget', 'soon'], noDocker).code, 2);
@@ -126,6 +126,27 @@ test('locks of one table are merged across modes, and only tables that existed a
   assert.equal(held[0].ms, 100 + 50);
 });
 
+test('the owner of a container names the system: hostname, platform, under WSL the distro, and the boot', () => {
+  const parts = OWNER.split('/');
+  assert.ok(parts.length >= 2);
+  assert.equal(parts[1], process.platform);
+  const distro = process.env.WSL_DISTRO_NAME ? 1 : 0;
+  assert.equal(parts[2] && !parts[2].startsWith('boot-') ? parts[2] : undefined, process.env.WSL_DISTRO_NAME);
+  assert.equal(parts.length, 2 + distro + (parts.at(-1).startsWith('boot-') ? 1 : 0));
+  assert.equal(ownerOf('h', 'linux', 'Ubuntu', 'abc'), 'h/linux/Ubuntu/boot-abc');
+  assert.equal(ownerOf('h', 'linux', undefined, ''), 'h/linux');
+});
+
+test('the boot id comes from the cheapest source of each platform and falls back to nothing', () => {
+  assert.equal(bootIdOf('linux', { readText: (p) => (p === '/proc/sys/kernel/random/boot_id' ? '2b6c-11ee\n' : '') }), '2b6c-11ee');
+  assert.equal(bootIdOf('darwin', { run: (cmd, args) => (cmd === 'sysctl' && args.join(' ') === '-n kern.boottime' ? '{ sec = 1767225600, usec = 250 } Thu Jan  1 00:00:00 2026\n' : '') }), '1767225600');
+  assert.equal(bootIdOf('win32', { run: () => '20260101000000\r\n' }), '20260101000000');
+  assert.equal(bootIdOf('win32', { run: () => 'garbage' }), '');
+  assert.equal(bootIdOf('linux', { readText: () => { throw new Error('no /proc'); } }), '');
+  assert.equal(bootIdOf('freebsd', {}), '');
+  assert.ok(bootIdOf(process.platform) !== undefined);
+});
+
 test('signal exit codes follow the shell convention', () => {
   assert.deepEqual(SIGNAL_EXIT, { SIGHUP: 129, SIGINT: 130, SIGTERM: 143 });
 });
@@ -149,6 +170,76 @@ test('error descriptions carry a position or code, never the text of the error',
   const my = makeEngine({ kind: 'mysql', image: 'mysql:8.4' });
   assert.equal(pg.describeError('psql:<stdin>:12: ERROR:  duplicate key value violates unique constraint "u" DETAIL: Key (email)=(a@b.c)'), 'at line 12');
   assert.equal(my.describeError("ERROR 1062 (23000) at line 7: Duplicate entry 'a@b.c' for key 'u'"), 'ERROR 1062 (23000) at line 7');
+});
+
+test('SQL Server: --edition picks MSSQL_PID, Express stops at 10 GB, errors are described by number and line', () => {
+  const run = (tag, edition) => makeEngine({ kind: 'mssql', tag, image: `mcr.microsoft.com/mssql/server:${tag}` }, { edition }).runArgs({});
+  assert.ok(run('2022-latest', 'standard').includes('MSSQL_PID=Express'));
+  assert.ok(run('2019-latest', undefined).includes('MSSQL_PID=Express'));
+  assert.ok(run('2025-latest', 'standard').includes('MSSQL_PID=StandardDeveloper'));
+  assert.ok(run('2022-latest', 'enterprise').includes('MSSQL_PID=Developer'));
+  assert.ok(!run('2022-latest', 'standard').join(' ').includes('--tmpfs'), 'SQL Server needs O_DIRECT: no tmpfs');
+  const big = 11 * 1024 ** 3;
+  assert.throws(() => makeEngine({ kind: 'mssql', tag: '2022-latest', image: 'x' }, { edition: 'standard' }).checkSeed(big), /stops at 10 GB per database/);
+  makeEngine({ kind: 'mssql', tag: '2022-latest', image: 'x' }, { edition: 'enterprise' }).checkSeed(big);
+  makeEngine({ kind: 'mssql', tag: '2025-latest', image: 'x' }, { edition: 'standard' }).checkSeed(big);
+  const ms = makeEngine({ kind: 'mssql', tag: '2022-latest', image: 'x' });
+  assert.equal(ms.describeError("Msg 2714, Level 16, State 6, Server 5fe6, Line 3\nThere is already an object named 'x'"), 'Msg 2714 at line 3');
+  assert.deepEqual(ms.errorLines('Msg 4902, Level 16, State 1, Server s, Line 1\nCannot find the object "t" containing 5 rows'), ['Msg 4902, Level 16, State 1, Server s, Line 1']);
+  assert.match(ms.pollInput(), /dm_tran_locks[^]*'Sch-M', 'X', 'SIX', 'S'[^]*@@END/);
+  assert.match(ms.probe.hold, /TABLOCKX, HOLDLOCK[^]*WAITFOR DELAY '00:00:03'/);
+});
+
+test('Oracle and Db2 scripts are rebuilt from their statements for the client', () => {
+  const ora = makeEngine({ kind: 'oracle', tag: '23-slim', image: 'x' }, {});
+  const o = ora.scriptInput("SET DEFINE OFF\nALTER TABLE t ADD (c NUMBER);\nBEGIN\n  EXECUTE IMMEDIATE 'ALTER TABLE t ADD (d NUMBER)';\nEND;\n/\n", { wrap: false, marks: true });
+  assert.ok(o.marked);
+  assert.match(o.input, /SET DEFINE OFF\nALTER TABLE t ADD \(c NUMBER\);\nBEGIN\n  EXECUTE IMMEDIATE 'ALTER TABLE t ADD \(d NUMBER\)';\nEND;\n\/\n/);
+  assert.equal((o.input.match(/ALTER TABLE t ADD \(d NUMBER\)/g) ?? []).length, 1, 'the statement inside a block is not sent twice');
+  assert.match(ora.pollerArgs('c').join(' '), /SYSTEM\//);
+  assert.match(ora.scriptArgs('c', { app: 'msafe-migration', stopOnError: true }).join(' '), /WHENEVER SQLERROR EXIT FAILURE[^]*SET_MODULE\(\S{1,5}msafe-migration/);
+  assert.ok(!ora.scriptArgs('c', { app: 'x', stopOnError: false }).join(' ').includes('WHENEVER SQLERROR'));
+  assert.match(ora.pollInput(), /v\$lock[^]*dba_ddl_locks[^]*@@END/);
+  assert.equal(ora.describeError('ORA-00942: table or view does not exist'), 'ORA-00942');
+  assert.match(ora.editionNote, /not emulated/);
+  const noSlash = ora.scriptInput('ALTER TABLE t ADD (c NUMBER);\nBEGIN\n  NULL;\nEND;\n', { wrap: false, marks: true });
+  assert.equal(noSlash.input, '', 'a script that would hang SQL*Plus is not sent');
+  assert.match(noSlash.error, /without its closing `\/`.*line 2.*oracle-missing-slash.*not run/);
+  assert.equal(ora.scriptInput('BEGIN\n  NULL;\nEND;\n/\nALTER TABLE t ADD (d NUMBER);\n', { marks: false }).error, undefined);
+  const db2 = makeEngine({ kind: 'db2', tag: '11.5.9.0', image: 'x' }, {});
+  const d = db2.scriptInput("--#SET TERMINATOR @\nCREATE TRIGGER x AFTER INSERT ON t FOR EACH ROW BEGIN ATOMIC SELECT 1 FROM sysibm.sysdummy1; END@\nALTER TABLE t ADD COLUMN c INTEGER@\n", { wrap: true, marks: true });
+  assert.match(d.input, /^UPDATE COMMAND OPTIONS USING C OFF~\nVALUES CHR\(64\)/);
+  assert.match(d.input, /BEGIN ATOMIC SELECT 1 FROM sysibm\.sysdummy1; END\n~\nALTER TABLE t ADD COLUMN c INTEGER\n~\n/);
+  assert.match(d.input, /COMMIT~\nVALUES CHR\(64\) \|\| CHR\(64\) \|\| 'T1 '/);
+  assert.match(db2.scriptArgs('c', { app: 'a', stopOnError: true }).join(' '), /-td~ -s/);
+  assert.match(db2.scriptArgs('c', { app: 'a', stopOnError: false, dump: true }).join(' '), /db2 -x -t -f/);
+  assert.match(db2.pollInput(), /MON_GET_LOCKS[^]*CLIENT_APPLNAME = 'msafe-migration'[^]*'Z', 'X', 'S', 'SIX'/);
+  assert.match(db2.runArgs({}).join(' '), /--privileged -e LICENSE=accept/);
+  assert.match(db2.pendingProbe.sql, /DROP COLUMN c2/);
+  assert.equal(db2.describeError('SQL0204N  "DB2INST1.X" is an undefined name.  SQLSTATE=42704'), 'SQL0204N');
+});
+
+test('SQL Server scripts are sent with GO batches, marks inside the server and a transaction only when the runner wraps', () => {
+  const ms = makeEngine({ kind: 'mssql', tag: '2022-latest', image: 'x' });
+  const plain = ms.scriptInput('ALTER TABLE t ADD c int;', { wrap: false, marks: true });
+  assert.ok(plain.marked);
+  assert.match(plain.input, /^SET NOCOUNT ON;\nSELECT CONCAT\('@@T0 '[^]*ALTER TABLE t ADD c int;\nGO\nSELECT CONCAT\('@@T1 '/);
+  assert.ok(!/BEGIN TRANSACTION/.test(plain.input));
+  const wrapped = ms.scriptInput('ALTER TABLE t ADD c int;', { wrap: true, marks: true }).input;
+  assert.match(wrapped, /SET XACT_ABORT ON;\nBEGIN TRANSACTION;\nGO\n[^]*COMMIT TRANSACTION;\nGO\n$/);
+  assert.ok(ms.base('c').includes('127.0.0.1'), 'a container with no network has no ::1');
+});
+
+test('--edition is validated per engine before docker is touched: exit 2', (t) => {
+  const up = put(scratch(t), '0001.sql', 'SELECT 1;\n');
+  const noDocker = { env: onlyPath(scratch(t)) };
+  for (const args of [['--engine', 'postgres:16', '--edition', 'standard'], ['--engine', 'mssql:2022-latest', '--edition', 'se2'], ['--engine', 'oracle:23', '--edition', 'standard'], ['--engine', 'sqlite', '--edition', 'standard']]) {
+    const r = cli([...args, PG_SEED, up], noDocker);
+    assert.equal(r.code, 2, args.join(' '));
+    assert.match(r.err, /--edition/);
+  }
+  const ok = cli(['--engine', 'mssql:2022-latest', '--edition', 'enterprise', PG_SEED, up], noDocker);
+  assert.match(ok.err, /docker is not available/);
 });
 
 // A fake docker is an executable script: Node cannot spawn .cmd files on Windows.
@@ -189,10 +280,16 @@ const dockerUp = () => {
 const available = dockerUp();
 const disabled = process.env.MSAFE_DOCKER_TESTS === '0';
 const required = process.env.MSAFE_REQUIRE_DOCKER === '1';
-const skip = disabled ? 'skipped: docker tests disabled (MSAFE_DOCKER_TESTS=0)' : available ? false : 'skipped: docker not available';
+// A skipped Docker test says why, and what covers the situation it skips: the engines' scripts, error parsing and
+// the lint rules run on every OS without Docker, and the rehearsals themselves run in the CI jobs below.
+const COVERED = 'covered without Docker by the unit tests in this file and test/*.test.mjs on every OS, and with Docker by the CI jobs docker-rehearsal, docker-mssql, docker-oracle (every pull request) and docker-db2 (schedule and workflow_dispatch)';
+const skip = disabled ? `skipped: docker tests disabled (MSAFE_DOCKER_TESTS=0); ${COVERED}` : available ? false : `skipped: docker not available, so nothing was rehearsed; ${COVERED}`;
+// The Db2 image needs a privileged x86_64 daemon and many minutes to start.
+const DB2_NOTE = 'the Db2 rehearsal needs a privileged x86_64 Docker daemon and runs in CI job docker-db2 (schedule and workflow_dispatch); the Db2 lint rules are covered on every OS by test/db2.test.mjs';
+const db2Skip = skip ? `${skip}; ${DB2_NOTE}` : process.arch === 'x64' ? false : `skipped: ${DB2_NOTE} (this machine is ${process.arch}, so nothing was rehearsed)`;
 const ENGINES = (process.env.MSAFE_DOCKER_ENGINES ?? 'postgres:16,mysql:8.4').split(',').map((s) => s.trim()).filter(Boolean);
 
-test('docker is available when the run requires it', { skip: !required || disabled }, () => {
+test('docker is available when the run requires it', { skip: disabled ? `skipped: docker tests disabled (MSAFE_DOCKER_TESTS=0); ${COVERED}` : required ? false : 'skipped: this guard only applies when MSAFE_REQUIRE_DOCKER=1 (the CI docker jobs); without it a missing docker is reported by the skip reasons of the tests below, and the engines are covered by the unit tests and CI jobs they name' }, () => {
   assert.ok(available, 'MSAFE_REQUIRE_DOCKER=1 but docker is not available');
 });
 
@@ -200,74 +297,182 @@ const containerOf = (out) => out.match(/in container (msafe-rehearse-[\w-]+)/)?.
 const exists = (name) => spawnSync('docker', ['inspect', name], { stdio: 'ignore', windowsHide: true }).status === 0;
 const remove = (name) => spawnSync('docker', ['rm', '-f', '-v', name], { stdio: 'ignore', windowsHide: true });
 
-for (const engine of ENGINES) {
-  const pg = engine.startsWith('postgres');
-  const seed = pg ? PG_SEED : MY_SEED;
-  const label = engine;
 
-  test(`${label}: ups report diffs and locks, a lock over the budget and a lossy migration fail, the container is removed`, { skip, timeout: 900000 }, (t) => {
+// What each engine family needs: a seed, the statements the shared scenarios run, and what they must print.
+const SCENARIOS = {
+  postgres: {
+    seed: PG_SEED, add: 'ALTER TABLE orders ADD COLUMN due_on date;\n',
+    lock: 'BEGIN;\nLOCK TABLE orders IN ACCESS EXCLUSIVE MODE;\nSELECT pg_sleep(1.5);\nCOMMIT;\n', lockRe: /lock: AccessExclusiveLock on orders held ~1\.\d\d s \(\d+ poll\(s\)\), over the 0\.5 s budget/,
+    drop: 'ALTER TABLE orders DROP COLUMN note;\n',
+    dump: `SET statement_timeout = 0;\nCREATE TABLE users (id integer PRIMARY KEY, email text NOT NULL);\nALTER TABLE users OWNER TO no_such_role;\nCOPY users (id, email) FROM stdin;\n1\ta@example.com\n2\tb@example.com\n\\.\n`,
+    dumpError: /at line 3\n/,
+    up: '-- +goose Up\nALTER TABLE users ADD COLUMN nickname text;\nUPDATE users SET nickname = split_part(email, \'@\', 1);\n-- +goose Down\nALTER TABLE users DROP COLUMN nickname;\n', runner: /goose|dbmate/,
+    bad: 'ALTER TABLE no_such_table ADD COLUMN x int;\n', after: 'ALTER TABLE users ADD COLUMN y int;\n',
+  },
+  mysql: {
+    seed: MY_SEED, add: 'ALTER TABLE orders ADD COLUMN due_on date NULL;\n',
+    lock: 'LOCK TABLES orders WRITE;\nSELECT SLEEP(1.5);\nUNLOCK TABLES;\n', lockRe: /lock: SHARED_NO_READ_WRITE on orders held ~1\.\d\d s .*over the 0\.5 s budget/,
+    drop: 'ALTER TABLE orders DROP COLUMN note;\n',
+    dump: "/*!40101 SET NAMES utf8mb4 */;\nCREATE TABLE `users` (`id` int NOT NULL PRIMARY KEY, `email` varchar(100) NOT NULL) ENGINE=InnoDB;\nALTER TABLE `missing_table` ADD COLUMN x int;\nLOCK TABLES `users` WRITE;\nINSERT INTO `users` VALUES (1,'a@example.com'),(2,'b@example.com');\nUNLOCK TABLES;\n",
+    dumpError: /ERROR 1146 \(42S02\) at line 3\n/,
+    up: "-- migrate:up\nALTER TABLE users ADD COLUMN nickname varchar(50) NULL;\nUPDATE users SET nickname = SUBSTRING_INDEX(email, '@', 1);\n-- migrate:down\nALTER TABLE users DROP COLUMN nickname;\n", runner: /goose|dbmate/,
+    extra: [['0002_proc.sql', '-- +goose Up\n-- +goose StatementBegin\nCREATE PROCEDURE msafe_touch() BEGIN SELECT 1; SELECT 2; END\n-- +goose StatementEnd\n-- +goose Down\nDROP PROCEDURE msafe_touch;\n']],
+    bad: 'ALTER TABLE no_such_table ADD COLUMN x int;\n', after: 'ALTER TABLE users ADD COLUMN y int;\n',
+  },
+  oracle: {
+    seed: join(FIXTURES, 'seed-oracle.sql'), add: 'ALTER TABLE orders ADD (due_on DATE);\n',
+    lock: 'LOCK TABLE orders IN EXCLUSIVE MODE;\nEXEC DBMS_SESSION.SLEEP(1.5);\nCOMMIT;\n', lockRe: /lock: X on orders held ~1\.\d\d s \(\d+ poll\(s\)\), over the 0\.5 s budget/,
+    drop: 'ALTER TABLE orders DROP COLUMN note;\n',
+    dump: "CREATE TABLE users (id NUMBER PRIMARY KEY, email VARCHAR2(100) NOT NULL);\nALTER TABLE missing_table ADD (x NUMBER);\nINSERT INTO users VALUES (1, 'a@example.com');\nINSERT INTO users VALUES (2, 'b@example.com');\nCOMMIT;\n",
+    dumpError: /ORA-00942\n/,
+    up: "-- migrate:up\nALTER TABLE users ADD (nickname VARCHAR2(50));\nUPDATE users SET nickname = SUBSTR(email, 1, INSTR(email, '@') - 1);\nCOMMIT;\n-- migrate:down\nALTER TABLE users DROP COLUMN nickname;\n",
+    bad: 'ALTER TABLE no_such_table ADD (x NUMBER);\n', badRe: /ORA-00942/, after: 'ALTER TABLE users ADD (y NUMBER);\n',
+  },
+  db2: {
+    seed: join(FIXTURES, 'seed-db2.sql'), add: 'ALTER TABLE orders ADD COLUMN due_on DATE;\n',
+    lock: 'UPDATE COMMAND OPTIONS USING C OFF;\nLOCK TABLE orders IN EXCLUSIVE MODE;\nCALL DBMS_ALERT.SLEEP(2);\nCOMMIT;\n', lockRe: /lock: X on orders held ~[12]\.\d\d s \(\d+ poll\(s\)\), over the 0\.5 s budget/,
+    drop: "ALTER TABLE orders DROP COLUMN note;\nCALL SYSPROC.ADMIN_CMD('REORG TABLE orders');\n",
+    dump: "CREATE TABLE users (id INTEGER NOT NULL PRIMARY KEY, email VARCHAR(100) NOT NULL);\nALTER TABLE missing_table ADD COLUMN x INTEGER;\nINSERT INTO users VALUES (1, 'a@example.com'), (2, 'b@example.com');\nCOMMIT;\n",
+    dumpError: /SQL0204N\n/,
+    up: "-- migrate:up\nALTER TABLE users ADD COLUMN nickname VARCHAR(50);\nUPDATE users SET nickname = SUBSTR(email, 1, LOCATE('@', email) - 1);\n-- migrate:down\nALTER TABLE users DROP COLUMN nickname;\nCALL SYSPROC.ADMIN_CMD('REORG TABLE users');\n",
+    bad: 'ALTER TABLE no_such_table ADD COLUMN x INTEGER;\n', badRe: /SQL0204N/, after: 'ALTER TABLE users ADD COLUMN y INTEGER;\n',
+  },
+  mssql: {
+    seed: join(FIXTURES, 'seed-mssql.sql'), add: 'ALTER TABLE orders ADD due_on date NULL;\n',
+    lock: "BEGIN TRANSACTION;\nSELECT 1 FROM orders WITH (TABLOCKX, HOLDLOCK);\nWAITFOR DELAY '00:00:01.5';\nCOMMIT TRANSACTION;\n", lockRe: /lock: X on orders held ~1\.\d\d s \(\d+ poll\(s\)\), over the 0\.5 s budget/,
+    drop: 'ALTER TABLE orders DROP COLUMN note;\n',
+    dump: 'CREATE TABLE users (id int PRIMARY KEY, email nvarchar(100) NOT NULL);\nGO\nALTER TABLE missing_table ADD x int;\nGO\nINSERT INTO users VALUES (1, N\'a@example.com\'), (2, N\'b@example.com\');\nGO\n',
+    dumpError: /Msg 4902 at line 1\n/,
+    up: "-- migrate:up\nALTER TABLE users ADD nickname nvarchar(50) NULL;\nGO\nUPDATE users SET nickname = LEFT(email, CHARINDEX('@', email) - 1);\n-- migrate:down\nALTER TABLE users DROP COLUMN nickname;\n", runner: /goose|dbmate/,
+    bad: 'ALTER TABLE no_such_table ADD x int;\n', after: 'ALTER TABLE users ADD y int;\n',
+  },
+};
+const familyOf = (engine) => ({ mariadb: 'mysql' }[engine.split(':')[0]] ?? engine.split(':')[0]);
+
+for (const engine of ENGINES) {
+  const family = familyOf(engine);
+  const sc = SCENARIOS[family];
+  const skipHere = family === 'db2' ? db2Skip : skip;
+  const label = engine;
+  if (!sc) continue;
+
+  test(`${label}: ups report diffs and locks, a lock over the budget and a lossy migration fail, the container is removed`, { skip: skipHere, timeout: 1500000 }, (t) => {
     const dir = scratch(t);
-    const add = put(dir, '0001_add.sql', pg ? 'ALTER TABLE orders ADD COLUMN due_on date;\n' : 'ALTER TABLE orders ADD COLUMN due_on date NULL;\n');
-    const lock = put(dir, '0002_lock.sql', pg
-      ? 'BEGIN;\nLOCK TABLE orders IN ACCESS EXCLUSIVE MODE;\nSELECT pg_sleep(1.5);\nCOMMIT;\n'
-      : 'LOCK TABLES orders WRITE;\nSELECT SLEEP(1.5);\nUNLOCK TABLES;\n');
-    const drop = put(dir, '0003_drop.sql', 'ALTER TABLE orders DROP COLUMN note;\n');
-    const r = cli(['--engine', engine, seed, add, lock, drop, '--lock-budget', '0.5']);
+    const add = put(dir, '0001_add.sql', sc.add);
+    const lock = put(dir, '0002_lock.sql', sc.lock);
+    const drop = put(dir, '0003_drop.sql', sc.drop);
+    const r = cli(['--engine', engine, sc.seed, add, lock, drop, '--lock-budget', '0.5']);
     t.after(() => { const n = containerOf(r.out); if (n) remove(n); });
     assert.equal(r.code, 1, r.out + r.err);
-    assert.match(r.out, new RegExp(`engine ${engine} in container msafe-rehearse-`));
+    assert.match(r.out, new RegExp(`engine .*${engine.split(':')[1].replace(/\W/g, '.')} in container msafe-rehearse-`));
     assert.match(r.out, /seed: .* loaded in .* \(2 table\(s\), 7 row\(s\)\)/);
     assert.match(r.out, /ran\s+up\s.*0001_add\.sql in \d+ ms\n\s+orders\s+rows 4\s+columns: \+due_on\n\s+users\s+rows 3/);
     assert.match(r.out, /LOCKED\s+up\s.*0002_lock\.sql/);
-    assert.match(r.out, pg ? /lock: AccessExclusiveLock on orders held ~1\.\d\d s \(\d+ poll\(s\)\), over the 0\.5 s budget/ : /lock: SHARED_NO_READ_WRITE on orders held ~1\.\d\d s .*over the 0\.5 s budget/);
+    assert.match(r.out, sc.lockRe);
     assert.match(r.out, /LOST\s+up\s.*0003_drop\.sql/);
     assert.match(r.out, /lost: orders\.note dropped with 2 non-NULL value\(s\)/);
     assert.match(r.out, /3 up\(s\) on .*: 2 problem\(s\)/);
     // the duration is read inside the server: a 1.5 s sleep takes 1.5 s whatever the docker round trip costs
     assert.match(r.out, /0002_lock\.sql in (1[4-9]\d\d|2[0-4]\d\d) ms/);
-    assert.match(r.out, /polled every ~\d+ ms/);
+    // every migration prints what the polling saw: its locks, or how often it looked (Oracle shows even a quick DDL's own lock)
+    assert.match(r.out, /polled every ~\d+ ms|held ~\d\.\d\d s \(\d+ poll\(s\)\)/);
     assert.ok(!/no write lock over/.test(r.out), 'a run with problems never claims there was no lock');
     const name = containerOf(r.out);
     assert.ok(name, 'the container name is printed');
     assert.ok(!exists(name), `${name} must be removed`);
   });
 
-  test(`${label}: --dump loads tolerating errors; --down runs up, down, up; a lock inside the budget passes`, { skip, timeout: 900000 }, (t) => {
+  test(`${label}: --dump loads tolerating errors; --down runs up, down, up; a lock inside the budget passes`, { skip: skipHere, timeout: 1500000 }, (t) => {
     const dir = scratch(t);
-    const dump = put(dir, 'dump.sql', pg
-      ? `SET statement_timeout = 0;\nCREATE TABLE users (id integer PRIMARY KEY, email text NOT NULL);\nALTER TABLE users OWNER TO no_such_role;\nCOPY users (id, email) FROM stdin;\n1\ta@example.com\n2\tb@example.com\n\\.\n`
-      : "/*!40101 SET NAMES utf8mb4 */;\nCREATE TABLE `users` (`id` int NOT NULL PRIMARY KEY, `email` varchar(100) NOT NULL) ENGINE=InnoDB;\nALTER TABLE `missing_table` ADD COLUMN x int;\nLOCK TABLES `users` WRITE;\nINSERT INTO `users` VALUES (1,'a@example.com'),(2,'b@example.com');\nUNLOCK TABLES;\n");
-    const up = pg
-      ? put(dir, '0001_nick.sql', '-- +goose Up\nALTER TABLE users ADD COLUMN nickname text;\nUPDATE users SET nickname = split_part(email, \'@\', 1);\n-- +goose Down\nALTER TABLE users DROP COLUMN nickname;\n')
-      : put(dir, '0001_nick.sql', "-- migrate:up\nALTER TABLE users ADD COLUMN nickname varchar(50) NULL;\nUPDATE users SET nickname = SUBSTRING_INDEX(email, '@', 1);\n-- migrate:down\nALTER TABLE users DROP COLUMN nickname;\n");
-    // a stored procedure keeps its inner semicolons (goose StatementBegin/End) on MySQL and MariaDB
-    const proc = pg ? [] : [put(dir, '0002_proc.sql', '-- +goose Up\n-- +goose StatementBegin\nCREATE PROCEDURE msafe_touch() BEGIN SELECT 1; SELECT 2; END\n-- +goose StatementEnd\n-- +goose Down\nDROP PROCEDURE msafe_touch;\n')];
-    const r = cli(['--engine', engine, '--dump', dump, up, ...proc, '--down']);
+    const dump = put(dir, 'dump.sql', sc.dump);
+    const up = put(dir, '0001_nick.sql', sc.up);
+    const extra = (sc.extra ?? []).map(([n, body]) => put(dir, n, body));
+    const r = cli(['--engine', engine, '--dump', dump, up, ...extra, '--down']);
     t.after(() => { const n = containerOf(r.out); if (n) remove(n); });
     assert.equal(r.code, 0, r.out + r.err);
     assert.match(r.out, /runner: (goose|dbmate)/);
-    assert.match(r.out, /seed: the dump loaded with 1 error line\(s\), first (at line 3|ERROR 1146 \(42S02\) at line 3)\n/);
+    assert.match(r.out, new RegExp(`seed: the dump loaded with 1 error line\\(s\\), first ${sc.dumpError.source}`));
     assert.ok(!/no_such_role|missing_table/.test(r.out), 'the text of a dump error can quote data and is not printed');
-    if (!pg) assert.match(r.out, /ran\s+up\s.*0002_proc\.sql/);
+    if (extra.length) assert.match(r.out, /ran\s+up\s.*0002_proc\.sql/);
     assert.match(r.out, /\(1 table\(s\), 2 row\(s\)\)/);
     assert.match(r.out, /ran\s+up\s[^]*?columns: \+nickname/);
     assert.match(r.out, /ran\s+down\s[^]*?columns: -nickname \(2 non-NULL\)/);
     assert.match(r.out, /after the down\(s\) the tables and columns match the seed/);
-    assert.match(r.out, new RegExp(`${pg ? 1 : 2} up\\(s\\), ${pg ? 1 : 2} down\\(s\\) on .*all ran, no rows or values lost, no write lock over 2 s`));
+    const n = 1 + extra.length;
+    assert.match(r.out, new RegExp(`${n} up\\(s\\), ${n} down\\(s\\) on .*all ran, no rows or values lost, no write lock over 2 s`));
     assert.ok(!exists(containerOf(r.out)));
   });
 
-  test(`${label}: a failing migration stops the rest and the container is still removed`, { skip, timeout: 900000 }, (t) => {
+  test(`${label}: a failing migration stops the rest and the container is still removed`, { skip: skipHere, timeout: 1500000 }, (t) => {
     const dir = scratch(t);
-    const bad = put(dir, '0001_bad.sql', 'ALTER TABLE no_such_table ADD COLUMN x int;\n');
-    const after = put(dir, '0002_after.sql', 'ALTER TABLE users ADD COLUMN y int;\n');
-    const r = cli(['--engine', engine, seed, bad, after]);
+    const bad = put(dir, '0001_bad.sql', sc.bad);
+    const after = put(dir, '0002_after.sql', sc.after);
+    const r = cli(['--engine', engine, sc.seed, bad, after]);
     t.after(() => { const n = containerOf(r.out); if (n) remove(n); });
     assert.equal(r.code, 1, r.out + r.err);
-    assert.match(r.out, /FAILED\s+up\s.*0001_bad\.sql: .*no_such_table/);
+    assert.match(r.out, new RegExp(`FAILED\\s+up\\s.*0001_bad\\.sql: .*${(sc.badRe ?? /no_such_table/i).source}`, 'i'));
     assert.match(r.out, /SKIPPED up\s.*0002_after/);
     assert.ok(!/ran\s+up/.test(r.out));
     assert.ok(!exists(containerOf(r.out)));
+  });
+}
+
+const oraEngine = ENGINES.find((e) => e.startsWith('oracle:'));
+if (oraEngine) {
+  test(`${oraEngine}: SE2 is not emulated and the run says so; ONLINE passes on Free, a PL/SQL block and DDL implicit commits are handled`, { skip, timeout: 2400000 }, (t) => {
+    const dir = scratch(t);
+    const online = put(dir, '0001_idx.sql', 'CREATE INDEX ix_orders_note ON orders (note) ONLINE;\n');
+    const block = put(dir, '0002_block.sql', "BEGIN\n  EXECUTE IMMEDIATE 'ALTER TABLE orders ADD (flag NUMBER)';\nEND;\n/\n");
+    const r = cli(['--engine', oraEngine, SCENARIOS.oracle.seed, online, block]);
+    t.after(() => { const n = containerOf(r.out); if (n) remove(n); });
+    assert.equal(r.code, 0, r.out + r.err);
+    assert.match(r.out, /edition: --edition se2 is not emulated: Oracle Free has the Enterprise Edition features/);
+    assert.match(r.out, /ran\s+up\s.*0001_idx\.sql/);
+    assert.match(r.out, /ran\s+up\s.*0002_block\.sql in \d+ ms\n\s+orders\s+rows 4\s+columns: \+flag/);
+    assert.ok(!exists(containerOf(r.out)));
+    assert.notEqual(spawnSync('docker', ['network', 'inspect', containerOf(r.out)], { stdio: 'ignore', windowsHide: true }).status, 0, 'the private network is removed with the container');
+    const failing = put(dir, '0003_fail.sql', 'ALTER TABLE orders ADD (a NUMBER);\nALTER TABLE no_such ADD (b NUMBER);\n');
+    const f = cli(['--engine', oraEngine, SCENARIOS.oracle.seed, failing]);
+    t.after(() => { const n = containerOf(f.out); if (n) remove(n); });
+    assert.equal(f.code, 1, f.out + f.err);
+    assert.match(f.out, /statements before the failing one stay applied: Oracle DDL commits implicitly/);
+  });
+}
+
+const db2Engine = ENGINES.find((e) => e.startsWith('db2:'));
+if (db2Engine) {
+  test(`${db2Engine}: a migration that leaves a table REORG-pending fails, one that runs the REORG passes`, { skip: db2Skip, timeout: 3600000 }, (t) => {
+    const dir = scratch(t);
+    const drop = put(dir, '0001_drop.sql', 'ALTER TABLE orders DROP COLUMN note;\n');
+    const r = cli(['--engine', db2Engine, '--allow-loss', 'orders.note', SCENARIOS.db2.seed, drop]);
+    t.after(() => { const n = containerOf(r.out); if (n) remove(n); });
+    assert.equal(r.code, 1, r.out + r.err);
+    assert.match(r.out, /PENDING\s+up\s.*0001_drop\.sql/);
+    assert.match(r.out, /REORG PENDING: orders is unusable until a classic REORG TABLE completes/);
+    assert.ok(!exists(containerOf(r.out)));
+    const fixed = put(dir, '0002_drop.sql', "ALTER TABLE orders DROP COLUMN note;\nCALL SYSPROC.ADMIN_CMD('REORG TABLE orders');\n");
+    const ok = cli(['--engine', db2Engine, '--allow-loss', 'orders.note', SCENARIOS.db2.seed, fixed]);
+    t.after(() => { const n = containerOf(ok.out); if (n) remove(n); });
+    assert.equal(ok.code, 0, ok.out + ok.err);
+    assert.ok(!/REORG PENDING/.test(ok.out));
+  });
+}
+
+for (const msEngine of ENGINES.filter((e) => e.startsWith('mssql:'))) {
+  test(`${msEngine}: --edition standard runs a non-Enterprise edition (ONLINE fails), --edition enterprise runs Developer (ONLINE works)`, { skip, timeout: 2400000 }, (t) => {
+    const dir = scratch(t);
+    const online = put(dir, '0001_idx.sql', 'CREATE INDEX ix_orders_note ON orders (user_id) WITH (ONLINE = ON);\n');
+    const std = cli(['--engine', msEngine, SCENARIOS.mssql.seed, online]);
+    t.after(() => { const n = containerOf(std.out); if (n) remove(n); });
+    assert.equal(std.code, 1, std.out + std.err);
+    assert.match(std.out, /edition: (Express|Standard)/);
+    assert.match(std.out, /FAILED\s+up\s.*0001_idx\.sql/);
+    const ent = cli(['--engine', msEngine, '--edition', 'enterprise', SCENARIOS.mssql.seed, online]);
+    t.after(() => { const n = containerOf(ent.out); if (n) remove(n); });
+    assert.equal(ent.code, 0, ent.out + ent.err);
+    assert.match(ent.out, /edition: (Enterprise )?Developer/);
+    assert.match(ent.out, /ran\s+up\s.*0001_idx\.sql/);
+    assert.ok(!exists(containerOf(std.out)) && !exists(containerOf(ent.out)));
   });
 }
 
@@ -370,13 +575,15 @@ if (pgEngine) {
     assert.ok(!/no write lock over/.test(r.out) && !/no write-blocking lock seen/.test(r.out), r.out);
   });
 
-  test(`${pgEngine}: containers left by killed runs are removed at the next start, live ones are not`, { skip, timeout: 600000 }, (t) => {
+  test(`${pgEngine}: containers left by killed runs on this system are removed at the next start, live ones and other systems' are not`, { skip, timeout: 600000 }, (t) => {
     const finished = spawnSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))'], { encoding: 'utf8' });
     const deadPid = Number(finished.stdout);
-    const abandoned = `msafe-rehearse-${deadPid}-aaaaaa`;
-    const running = `msafe-rehearse-${process.pid}-bbbbbb`;
-    for (const n of [abandoned, running]) {
-      const r = spawnSync('docker', ['run', '-d', '--label', 'msafe-rehearse=1', '--name', n, '--network', 'none', 'alpine:latest', 'sleep', '600'], { encoding: 'utf8', windowsHide: true });
+    const abandoned = { name: `msafe-rehearse-${deadPid}-aaaaaa`, owner: OWNER };
+    const running = { name: `msafe-rehearse-${process.pid}-bbbbbb`, owner: OWNER };
+    const elsewhere = { name: `msafe-rehearse-${deadPid}-cccccc`, owner: `${OWNER}/another-system` };
+    const otherBoot = { name: `msafe-rehearse-${deadPid}-dddddd`, owner: `${OWNER.replace(/\/boot-[^/]*$/, '')}/boot-another-boot` };
+    for (const { name: n, owner } of [abandoned, running, elsewhere, otherBoot]) {
+      const r = spawnSync('docker', ['run', '-d', '--label', 'msafe-rehearse=1', '--label', `msafe-owner=${owner}`, '--name', n, '--network', 'none', 'alpine:3.20.3', 'sleep', '600'], { encoding: 'utf8', windowsHide: true });
       assert.equal(r.status, 0, r.stderr);
       t.after(() => remove(n));
     }
@@ -384,8 +591,10 @@ if (pgEngine) {
     const r = cli(['--engine', 'postgres:msafe-no-such-tag-0000', PG_SEED, up]);
     assert.equal(r.code, 2, r.out + r.err);
     assert.match(r.out, /removed 1 rehearsal container\(s\) left behind by runs that were killed/);
-    assert.ok(!exists(abandoned), 'the abandoned container is removed');
-    assert.ok(exists(running), 'a container whose process is alive is left alone');
+    assert.ok(!exists(abandoned.name), 'the abandoned container is removed');
+    assert.ok(exists(running.name), 'a container whose process is alive is left alone');
+    assert.ok(exists(elsewhere.name), 'a container started from another system sharing the daemon is left alone');
+    assert.ok(exists(otherBoot.name), 'a container from another boot of a system with the same hostname is left alone');
   });
 }
 

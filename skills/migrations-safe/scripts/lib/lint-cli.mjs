@@ -6,11 +6,19 @@ import { decodeSql } from './parse.mjs';
 
 export const USAGE = `usage: migration-lint.mjs <file|dir|->... [options]
 
-  --dialect postgres|sqlite|mysql   default: from the file, the project (migration_lock.toml, drizzle config) or its syntax
-  --runner <id>                     prisma|drizzle|flyway|liquibase|goose|dbmate|golang-migrate|atlas|alembic|django|knex|raw
-                                    default: detected from the project's config files
-  --mysql-version <v>               server the MySQL/MariaDB rules assume: 8.0 (default), 8.0.28, 8.4, 5.7, mariadb-10.6;
-                                    default: the image in a compose file or CI workflow next to the migrations, else 8.0
+  --dialect postgres|sqlite|mysql|mssql|oracle|db2
+                                    default: from the file, the project (migration_lock.toml, drizzle config, flyway/liquibase/
+                                    Spring jdbc URL, .sqlproj, EF Core provider, Flyway module, compose image) or its syntax;
+                                    PostgreSQL is assumed, and said so, when nothing names the engine; project files that
+                                    name several engines (and no syntax decides) are exit 2
+  --runner <id>                     prisma|drizzle|flyway|liquibase|goose|dbmate|golang-migrate|atlas|alembic|django|knex|
+                                    efcore|dbup|sqlpackage|raw; default: detected from the project's config files
+  --server-version <v>              server the rules assume: MySQL 8.0 (default), 8.0.28, 8.4, 5.7, mariadb-10.6;
+                                    SQL Server 2022 (default), 2016, 2019, 2025; Oracle 19 (default), 12.1, 23; Db2 11.5
+                                    (default), 11.1. Default: the image in a compose file or CI workflow next to the migrations
+  --mysql-version <v>               same as --server-version, for MySQL and MariaDB files only
+  --edition <e>                     standard (default) | enterprise | azure for SQL Server; se2 (default) | ee for Oracle.
+                                    The default is the conservative edition: a Developer image does not prove production
   --history                         also run the git checks; with no paths, lint the migrations new in the branch
   --repo <dir>                      repository for --history (default: the cwd)
   --base <ref>                      base for --history (default: origin/main, origin/master, main, master)
@@ -35,6 +43,8 @@ const parseArgs = (argv) => {
     else if (a === '--dialect') opts.dialect = value(i++, a);
     else if (a === '--runner') opts.runner = value(i++, a);
     else if (a === '--mysql-version') opts.mysqlVersion = value(i++, a);
+    else if (a === '--server-version') opts.serverVersion = value(i++, a);
+    else if (a === '--edition') opts.edition = value(i++, a);
     else if (a === '--repo') opts.repo = value(i++, a);
     else if (a === '--base') opts.base = value(i++, a);
     else if (a === '--schema') opts.schema.push(value(i++, a));

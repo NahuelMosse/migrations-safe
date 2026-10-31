@@ -4,9 +4,12 @@ import { DEFAULT_LOCK_BUDGET_MS, parseDuration, parseEngine, rehearseDocker } fr
 
 export const usage = (name) => `usage: ${name} [--engine <engine>] <database.sqlite | seed.sql> <migration.sql>... [--down [<down.sql>...]] [options]
 
-  --engine <engine>   sqlite (default) | postgres:<tag> | mysql:<tag> | mariadb:<tag>, for example postgres:16
-                      or mysql:8.4. A server engine runs a throwaway Docker container (name msafe-rehearse-*)
+  --engine <engine>   sqlite (default) | postgres:<tag> | mysql:<tag> | mariadb:<tag> | mssql:<tag> | oracle:<tag> |
+                      db2:<tag>, for example postgres:16, mysql:8.4, mssql:2022-CU14-ubuntu-22.04, oracle:23.5-slim or db2:11.5.9.0.
+                      A server engine runs a throwaway Docker container (name msafe-rehearse-*)
                       that is reached with docker exec only and removed at the end, also on failure, Ctrl+C or SIGTERM
+  --edition <e>       mssql: standard (default, Express or Standard Developer) | enterprise (Developer);
+                      oracle: se2 (default, not emulated: Oracle Free has the Enterprise features) | ee
   <database | seed>   sqlite: a database file (copied, never written) or a .sql seed loaded into an empty one;
                       server engines: a .sql seed (.sql.gz too), loaded strictly
   --dump <file>       server engines: a pg_dump (plain, custom format) or mysqldump file, optionally .gz,
@@ -39,6 +42,7 @@ const parseArgs = (argv) => {
     else if (a === '--down') { mode = 'down'; opts.downs = []; }
     else if (a === '--runner') opts.runner = value(i++, a);
     else if (a === '--engine') opts.engine = value(i++, a);
+    else if (a === '--edition') opts.edition = value(i++, a).toLowerCase();
     else if (a === '--dump') {
       if (opts.source !== null) throw new RehearsalUsageError(`--dump ${value(i, a)} would replace the seed or migration already given (${opts.source}): put --dump before the migrations, and give no other seed`);
       opts.source = value(i++, a);
@@ -65,11 +69,14 @@ export const runRehearseCli = async (argv, { out = (s) => console.log(s), err = 
     const opts = parseArgs(argv);
     if (opts.help) { out(usage(name)); return 0; }
     if (opts.engine === 'sqlite') {
-      for (const [flag, used] of [['--dump', opts.dump], ['--keep', opts.keep], ['--lock-budget', opts.lockBudgetMs !== null], ['--disk', opts.disk === true]])
-        if (used) throw new RehearsalUsageError(`${flag} needs a server engine: --engine postgres:<tag>, mysql:<tag> or mariadb:<tag>`);
+      for (const [flag, used] of [['--edition', opts.edition !== undefined], ['--dump', opts.dump], ['--keep', opts.keep], ['--lock-budget', opts.lockBudgetMs !== null], ['--disk', opts.disk === true]])
+        if (used) throw new RehearsalUsageError(`${flag} needs a server engine: --engine postgres:<tag>, mysql:<tag>, mariadb:<tag>, mssql:<tag>, oracle:<tag> or db2:<tag>`);
       return await rehearse(opts, out);
     }
-    parseEngine(opts.engine);
+    const { kind } = parseEngine(opts.engine);
+    const editions = { mssql: ['standard', 'enterprise'], oracle: ['se2', 'ee'] }[kind];
+    if (opts.edition && !editions) throw new RehearsalUsageError(`--edition applies to mssql (standard, enterprise) and oracle (se2, ee), not to ${kind}`);
+    if (opts.edition && !editions.includes(opts.edition)) throw new RehearsalUsageError(`--edition for ${kind} takes ${editions.join(' or ')} (got "${opts.edition.slice(0, 20)}")`);
     if (opts.foreignKeys) throw new RehearsalUsageError('--foreign-keys is a SQLite option');
     return await rehearseDocker({ ...opts, lockBudgetMs: opts.lockBudgetMs ?? DEFAULT_LOCK_BUDGET_MS }, out);
   } catch (e) {

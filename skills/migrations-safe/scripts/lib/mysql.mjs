@@ -1,7 +1,5 @@
 // MySQL and MariaDB knowledge the rules need: server versions, which online DDL algorithm an operation can
-// use, column and ENUM/SET definitions, and where the server version of a project is declared.
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+// use, and column and ENUM/SET definitions.
 import { UsageError } from './errors.mjs';
 import { ident, name, splitTopLevel, stripLiterals } from './parse.mjs';
 import { parseAlter } from './schema.mjs';
@@ -231,44 +229,3 @@ export const learnStatement = (t, maps, v) => {
   if (alter) learnActions(alter.table, alter.actions, maps, v);
 };
 export { INDEX_STATEMENT };
-
-// ── Where a project declares its server version ────────────────────────────────────────────────────────
-
-const read = (p) => { try { return readFileSync(p, 'utf8'); } catch { return ''; } };
-const COMPOSE = ['docker-compose.yml', 'docker-compose.yaml', 'compose.yml', 'compose.yaml', 'docker-compose.override.yml'];
-
-const fromText = (text) => {
-  const found = [];
-  for (const m of text.matchAll(/^\s*(?:-\s*)?image:\s*["']?(?:docker\.io\/(?:library\/)?)?(mysql|mariadb)(?::|\/)?([\d][\w.-]*)/gim)) found.push(`${m[1]}-${m[2]}`);
-  return found;
-};
-
-const order = (v) => [v.major, v.minor ?? Infinity, v.patch ?? Infinity];
-const older = (a, b) => { const [x, y] = [order(a), order(b)]; for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i] < y[i]; return false; };
-
-// The server version declared next to the migrations: a compose file or CI workflow image, or .tool-versions.
-// Returns { version, evidence, conflict } where `conflict` lists the labels when the declarations disagree
-// (the oldest of one flavor is then used, because the rules must hold on every declared server).
-export const projectMysqlVersion = (path, limit = 8) => {
-  let dir = resolve(path);
-  if (existsSync(dir) && !readdirSafe(dir)) dir = dirname(dir);
-  for (let n = 0; n < limit; n++) {
-    const hits = [];
-    for (const f of COMPOSE) for (const v of fromText(read(join(dir, f)))) hits.push({ v, from: f });
-    const tools = read(join(dir, '.tool-versions')).match(/^(mysql|mariadb)\s+(\d[\w.]*)/im);
-    if (tools) hits.push({ v: `${tools[1]}-${tools[2]}`, from: '.tool-versions' });
-    const wf = join(dir, '.github', 'workflows');
-    for (const f of readdirSafe(wf) ?? []) if (/\.ya?ml$/i.test(f)) for (const v of fromText(read(join(wf, f)))) hits.push({ v, from: `.github/workflows/${f}` });
-    const parsed = hits.map((h) => ({ ...h, parsed: parseMysqlVersion(h.v) })).filter((h) => h.parsed);
-    if (parsed.length) {
-      const labels = [...new Set(parsed.map((h) => h.parsed.label))];
-      const pick = parsed.reduce((best, h) => (h.parsed.flavor === best.parsed.flavor && older(h.parsed, best.parsed) ? h : best), parsed[0]);
-      return { version: pick.parsed, evidence: `${pick.from} in ${dir}`, conflict: labels.length > 1 ? labels : null };
-    }
-    if (existsSync(join(dir, '.git')) || dirname(dir) === dir) break;
-    dir = dirname(dir);
-  }
-  return null;
-};
-
-function readdirSafe(dir) { try { return readdirSync(dir); } catch { return null; } }

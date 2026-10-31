@@ -5,26 +5,26 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { closeSync, createReadStream, existsSync, openSync, readSync, readFileSync, statSync } from 'node:fs';
+import { hostname } from 'node:os';
 import { createGunzip, gunzipSync } from 'node:zlib';
 import { decodeSql, parse } from './parse.mjs';
 import { RUNNER_IDS, detectRunner, profileOf, wrapsFile } from './runners.mjs';
 import { RehearsalUsageError, diff, partFor } from './rehearse.mjs';
+import { IMAGES, makeEngine, mysqlInput } from './engines/index.mjs';
+import { MIGRATION_APP, PROBE_TABLE, SEED_APP, docker, firstLines } from './engines/shared.mjs';
 
-export const ENGINE_KINDS = ['postgres', 'mysql', 'mariadb'];
+export { makeEngine, mysqlInput };
+export const ENGINE_KINDS = Object.keys(IMAGES);
 export const DEFAULT_LOCK_BUDGET_MS = 2000;
 export const SIGNAL_EXIT = { SIGHUP: 129, SIGINT: 130, SIGTERM: 143 };
-const PASSWORD = 'msafe';
-const DATABASE = 'rehearsal';
 const POLL_PAUSE_MS = 40;
 const TMPFS_SEED_LIMIT = 256 * 1024 * 1024;
-const MIGRATION_APP = 'msafe-migration';
-const PROBE_TABLE = 'msafe_probe';
 
 export const parseEngine = (spec) => {
   const [kind, ...rest] = String(spec).split(':');
   const tag = rest.join(':');
-  if (!ENGINE_KINDS.includes(kind) || !tag) throw new RehearsalUsageError(`--engine takes sqlite, postgres:<tag>, mysql:<tag> or mariadb:<tag> (got "${String(spec).slice(0, 40)}")`);
-  return { kind, tag, image: `${kind}:${tag}` };
+  if (!ENGINE_KINDS.includes(kind) || !tag) throw new RehearsalUsageError(`--engine takes sqlite, postgres:<tag>, mysql:<tag>, mariadb:<tag>, mssql:<tag>, oracle:<tag> or db2:<tag> (got "${String(spec).slice(0, 40)}")`);
+  return { kind, tag, image: `${IMAGES[kind]}:${tag}` };
 };
 
 // "2" and "2s" are seconds, "500ms" milliseconds.
@@ -46,50 +46,55 @@ export const seedBytes = (file) => {
   } finally { closeSync(fd); }
 };
 
-// ── docker ───────────────────────────────────────────────────────────────────────────────────────
-
-const docker = (args, { input, stream, timeoutMs = 600000 } = {}) => new Promise((resolve, reject) => {
-  const child = spawn('docker', args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
-  let out = '';
-  let err = '';
-  const timer = setTimeout(() => { child.kill(); reject(new RehearsalUsageError(`docker ${args[0]} timed out after ${Math.round(timeoutMs / 1000)} s`)); }, timeoutMs);
-  child.stdout.setEncoding('utf8').on('data', (d) => { out += d; });
-  child.stderr.setEncoding('utf8').on('data', (d) => { err += d; });
-  child.on('error', (e) => { clearTimeout(timer); reject(e); });
-  child.on('close', (code) => { clearTimeout(timer); resolve({ code, out, err }); });
-  child.stdin.on('error', () => { /* the client exited before reading everything: its exit code says why */ });
-  if (stream) {
-    stream.on('error', (e) => { child.kill(); reject(e); });
-    stream.pipe(child.stdin);
-  } else child.stdin.end(input ?? '');
-});
-
-const firstLines = (text, n = 3) => text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean).slice(0, n).join(' | ');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // Containers of this tool are named msafe-rehearse-<pid>-<id>. A run that is killed without a chance to clean
 // up (TerminateProcess, a CI cancel) leaves its container; the next run removes the ones whose pid is gone.
+// A pid only means something on the system that started the run, and one docker daemon can serve several
+// (Windows and its WSL distros share Docker Desktop and the hostname): each container and network is labelled
+// with its owner, and a run sweeps only its own system's. The owner ends with an id of the current boot of the
+// kernel. It covers reboots of the same host: a pid from before a reboot is never taken for a live one. It does
+// not separate systems that share a kernel (WSL2 distros, containers on the host network have the same boot id),
+// which is what WSL_DISTRO_NAME in the label is for.
+export const bootIdOf = (platform, { readText = (p) => readFileSync(p, 'utf8'), run = (cmd, args) => spawnSync(cmd, args, { encoding: 'utf8', timeout: 5000, windowsHide: true }).stdout } = {}) => {
+  try {
+    if (platform === 'linux') return readText('/proc/sys/kernel/random/boot_id').trim();
+    if (platform === 'darwin') return String(run('sysctl', ['-n', 'kern.boottime'])).match(/sec\s*=\s*(\d+)/)?.[1] ?? '';
+    if (platform === 'win32') return String(run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', '(Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToUniversalTime().ToString(\'yyyyMMddHHmmss\')'])).trim().match(/^\d{14}$/)?.[0] ?? '';
+  } catch { /* no id: the owner is then hostname, platform and distro, as before */ }
+  return '';
+};
+export const ownerOf = (host, platform, distro, boot) => [host, platform, distro, boot && `boot-${boot}`].filter(Boolean).join('/');
+export const OWNER = ownerOf(hostname(), process.platform, process.env.WSL_DISTRO_NAME, bootIdOf(process.platform));
 const pidAlive = (pid) => {
   try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; }
 };
 const sweepAbandoned = async (print) => {
-  const listed = await docker(['ps', '-a', '--filter', 'label=msafe-rehearse=1', '--format', '{{.Names}}'], { timeoutMs: 60000 });
+  const listed = await docker(['ps', '-a', '--filter', 'label=msafe-rehearse=1', '--format', '{{.Names}}\t{{.Label "msafe-owner"}}'], { timeoutMs: 60000 });
   if (listed.code !== 0) return;
-  const dead = listed.out.split(/\r?\n/).map((n) => n.trim()).filter((n) => {
+  const dead = listed.out.split(/\r?\n/).map((l) => l.trim().split('\t')).filter(([n, owner]) => {
     const pid = Number(n.match(/^msafe-rehearse-(\d+)-/)?.[1]);
-    return pid && pid !== process.pid && !pidAlive(pid);
-  });
+    return owner === OWNER && pid && pid !== process.pid && !pidAlive(pid);
+  }).map(([n]) => n);
   for (const n of dead) await docker(['rm', '-f', '-v', n], { timeoutMs: 120000 });
   if (dead.length) print(`removed ${dead.length} rehearsal container(s) left behind by runs that were killed`);
+  // the internal networks of engines that need an interface (Oracle) are named like their container
+  const nets = await docker(['network', 'ls', '--filter', 'label=msafe-rehearse=1', '--format', '{{.Name}}\t{{.Label "msafe-owner"}}'], { timeoutMs: 60000 });
+  for (const [n, owner] of nets.code === 0 ? nets.out.split(/\r?\n/).map((l) => l.trim().split('\t')) : []) {
+    const pid = Number(n.match(/^msafe-rehearse-(\d+)-/)?.[1]);
+    if (owner === OWNER && pid && pid !== process.pid && !pidAlive(pid)) await docker(['network', 'rm', n], { timeoutMs: 60000 });
+  }
 };
 
 const live = new Set();
+const liveNets = new Set();
 let hooked = false;
 const removeSync = (name) => spawnSync('docker', ['rm', '-f', '-v', name], { stdio: 'ignore', windowsHide: true });
+const removeNetSync = (name) => spawnSync('docker', ['network', 'rm', name], { stdio: 'ignore', windowsHide: true });
 const hookExit = () => {
   if (hooked) return;
   hooked = true;
-  const cleanUp = () => { for (const n of live) removeSync(n); live.clear(); };
+  const cleanUp = () => { for (const n of live) removeSync(n); live.clear(); for (const n of liveNets) removeNetSync(n); liveNets.clear(); };
   process.on('exit', cleanUp);
   for (const [sig, code] of Object.entries(SIGNAL_EXIT)) process.on(sig, () => { cleanUp(); process.exit(code); });
 };
@@ -112,105 +117,6 @@ const ensureImage = async (image, print) => {
   if (pulled.code !== 0) throw new RehearsalUsageError(`cannot pull ${image}: ${firstLines(pulled.err, 2) || `exit ${pulled.code}`}`);
 };
 
-// ── engines ──────────────────────────────────────────────────────────────────────────────────────
-
-const pgQuote = (id) => `"${id.replaceAll('"', '""')}"`;
-const pgLiteral = (s) => `'${s.replaceAll("'", "''")}'`;
-const myQuote = (id) => `\`${id.replaceAll('`', '``')}\``;
-const myLiteral = (s) => `'${s.replaceAll('\\', '\\\\').replaceAll("'", "''")}'`;
-const GEOMETRY = /^(?:geometry|point|linestring|polygon|multipoint|multilinestring|multipolygon|geometrycollection)\b/i;
-const lockList = (modes) => modes.map((m) => `'${m}'`).join(', ');
-
-const PG_LOCKS = ['AccessExclusiveLock', 'ExclusiveLock', 'ShareRowExclusiveLock', 'ShareLock'];
-const MY_LOCKS = ['EXCLUSIVE', 'SHARED_NO_WRITE', 'SHARED_NO_READ_WRITE', 'SHARED_READ_ONLY'];
-const pollSqlPg = `SELECT l.mode || E'\\t' || n.nspname || '.' || c.relname FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid JOIN pg_class c ON c.oid = l.relation JOIN pg_namespace n ON n.oid = c.relnamespace WHERE l.locktype = 'relation' AND l.granted AND c.relkind IN ('r', 'p') AND a.application_name = '${MIGRATION_APP}' AND l.mode IN (${lockList(PG_LOCKS)}) AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg\\_%';`;
-const pollSqlMysql = `SELECT CONCAT(m.LOCK_TYPE, '\\t', m.OBJECT_NAME) FROM performance_schema.metadata_locks m WHERE m.OBJECT_TYPE = 'TABLE' AND m.OBJECT_SCHEMA = '${DATABASE}' AND m.LOCK_STATUS = 'GRANTED' AND m.LOCK_TYPE IN (${lockList(MY_LOCKS)}) AND m.OWNER_THREAD_ID <> (SELECT t.THREAD_ID FROM performance_schema.threads t WHERE t.PROCESSLIST_ID = CONNECTION_ID());`;
-const pollSqlMaria = `SELECT CONCAT(REPLACE(LOCK_MODE, 'MDL_', ''), '\\t', TABLE_NAME) FROM information_schema.METADATA_LOCK_INFO WHERE TABLE_SCHEMA = '${DATABASE}' AND LOCK_MODE IN (${lockList(MY_LOCKS.map((m) => `MDL_${m}`))}) AND THREAD_ID <> CONNECTION_ID();`;
-
-// The statements a MySQL client runs: every statement ends with `;;`, so compound statements (procedures
-// from goose StatementBegin/End) keep their inner semicolons. A file that sets its own DELIMITER is sent as it is.
-export const mysqlInput = (sql, { wrap, marks }) => {
-  if (/^\s*delimiter\b/im.test(sql)) return { input: wrap ? `START TRANSACTION;\n${sql}\nCOMMIT;\n` : sql, marked: false };
-  const statements = parse(sql, { dialect: 'mysql' }).statements.map((s) => s.text);
-  const mark = (tag) => `SELECT CONCAT('@@${tag} ', UNIX_TIMESTAMP(SYSDATE(6)));;\n`;
-  const body = `DELIMITER ;;\n${marks ? mark('T0') : ''}${statements.map((s) => `${s};;\n`).join('')}${marks ? mark('T1') : ''}DELIMITER ;\n`;
-  return { input: wrap ? `START TRANSACTION;\n${body}COMMIT;\n` : body, marked: marks };
-};
-
-// One engine per run; `base(container, ...)` is the docker exec prefix up to the client's output flags.
-export const makeEngine = ({ kind, image }) => {
-  if (kind === 'postgres') {
-    const base = (c, { app } = {}) => ['exec', '-i', '-e', `PGPASSWORD=${PASSWORD}`, ...(app ? ['-e', `PGAPPNAME=${app}`] : []), c,
-      'psql', '-h', '127.0.0.1', '-U', 'postgres', '-d', DATABASE, '-X', '-q', '-A', '-t', '-F', '\t'];
-    const mark = (tag) => `SELECT '@@${tag} ' || extract(epoch from clock_timestamp());\n`;
-    return {
-      kind, image, label: 'PostgreSQL', dialect: 'postgres',
-      runArgs: ({ tmpfs }) => [...(tmpfs ? ['--tmpfs', '/var/lib/postgresql/data', '-e', 'PGDATA=/var/lib/postgresql/data/pgdata'] : []), '-e', `POSTGRES_PASSWORD=${PASSWORD}`, '-e', `POSTGRES_DB=${DATABASE}`, image, 'postgres', '-c', 'fsync=off', '-c', 'synchronous_commit=off', '-c', 'full_page_writes=off'],
-      setup: async () => null,
-      base,
-      readyArgs: (c) => [...base(c), '-c', 'SELECT 1'],
-      scriptArgs: (c, { app, stopOnError, wrap }) => [...base(c, { app }), ...(stopOnError ? ['-v', 'ON_ERROR_STOP=1'] : []), ...(wrap ? ['-1'] : []), '-f', '-'],
-      // an empty statement after the file ends a last statement that lacks its semicolon
-      scriptInput: (sql, { marks }) => ({ input: marks ? `${mark('T0')}${sql}\n;\n${mark('T1')}` : sql, marked: marks }),
-      queryArgs: (c) => [...base(c), '-v', 'ON_ERROR_STOP=1', '-f', '-'],
-      pollerArgs: (c) => [...base(c, { app: 'msafe-poller' }), '-v', 'ON_ERROR_STOP=1', '-f', '-'],
-      pollInput: () => `${pollSqlPg}\n\\echo @@END\n`,
-      errorLines: (stderr) => stderr.split(/\r?\n/).filter((l) => /\bERROR:/.test(l)),
-      // statement number only: an error text can quote row data
-      describeError: (line) => `at line ${line.match(/:(\d+): ERROR/)?.[1] ?? '?'}`,
-      metaSql: "SELECT n.nspname, c.relname, a.attname, format_type(a.atttypid, a.atttypmod) FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg\\_%' AND c.relkind IN ('r', 'p') AND a.attnum > 0 AND NOT a.attisdropped ORDER BY n.nspname, c.relname, a.attnum;",
-      tableKey: (schema, table) => (schema === 'public' ? table : `${schema}.${table}`),
-      statsSql: (key, { schema, name }, cols) => `SELECT row_to_json(x)::text FROM (SELECT ${pgLiteral(key)} AS t, count(*) AS n${cols.map((c, i) => `, count(${pgQuote(c.name)}) AS c${i}, count(DISTINCT ${pgQuote(c.name)}::text) AS d${i}, coalesce(sum(length(${pgQuote(c.name)}::text)), 0) AS l${i}, min(${pgQuote(c.name)}::text) AS lo${i}, max(${pgQuote(c.name)}::text) AS hi${i}`).join('')} FROM ${pgQuote(schema)}.${pgQuote(name)}) x;`,
-      normalizeLockTable: (t) => t.replace(/^public\./, ''),
-      shell: (c) => `docker exec -it -e PGPASSWORD=${PASSWORD} ${c} psql -h 127.0.0.1 -U postgres ${DATABASE}`,
-      probe: {
-        create: `CREATE TABLE ${PROBE_TABLE} (id int);`, drop: `DROP TABLE ${PROBE_TABLE};`,
-        hold: `BEGIN;\nLOCK TABLE ${PROBE_TABLE} IN ACCESS EXCLUSIVE MODE;\nSELECT pg_sleep(3);\nCOMMIT;\n`,
-      },
-    };
-  }
-  const maria = kind === 'mariadb';
-  const eng = {
-    kind, image, label: maria ? 'MariaDB' : 'MySQL', dialect: 'mysql', bin: 'mysql',
-    runArgs: ({ tmpfs }) => [...(tmpfs ? ['--tmpfs', '/var/lib/mysql'] : []), '-e', `${maria ? 'MARIADB' : 'MYSQL'}_ROOT_PASSWORD=${PASSWORD}`, '-e', `${maria ? 'MARIADB' : 'MYSQL'}_DATABASE=${DATABASE}`, image],
-    base: (c, extra = []) => ['exec', '-i', '-e', `MYSQL_PWD=${PASSWORD}`, c, eng.bin, '-h127.0.0.1', '-uroot', '--batch', '--raw', '--skip-column-names', '--default-character-set=utf8mb4', '-D', DATABASE, ...extra],
-    readyArgs: (c) => eng.base(c, ['-e', 'SELECT 1']),
-    scriptArgs: (c, { stopOnError }) => eng.base(c, stopOnError ? [] : ['--force']),
-    scriptInput: (sql, { wrap, marks }) => mysqlInput(sql, { wrap, marks }),
-    queryArgs: (c) => eng.base(c),
-    pollerArgs: (c) => eng.base(c, ['--unbuffered']),
-    pollInput: () => `${maria ? pollSqlMaria : pollSqlMysql}\nSELECT '@@END';\n`,
-    errorLines: (stderr) => stderr.split(/\r?\n/).filter((l) => /^ERROR \d+/.test(l)),
-    describeError: (line) => line.match(/^(ERROR \d+(?: \(\w+\))?)(?: at line (\d+))?/)?.slice(1).filter(Boolean).join(' at line ') ?? 'ERROR',
-    metaSql: `SELECT '', c.TABLE_NAME, c.COLUMN_NAME, c.COLUMN_TYPE FROM information_schema.COLUMNS c JOIN information_schema.TABLES t ON t.TABLE_SCHEMA = c.TABLE_SCHEMA AND t.TABLE_NAME = c.TABLE_NAME WHERE c.TABLE_SCHEMA = DATABASE() AND t.TABLE_TYPE = 'BASE TABLE' ORDER BY c.TABLE_NAME, c.ORDINAL_POSITION;`,
-    tableKey: (schema, table) => table,
-    statsSql: (key, { name }, cols) => `SELECT JSON_OBJECT('t', ${myLiteral(key)}, 'n', COUNT(*)${cols.map((c, i) => {
-      const v = GEOMETRY.test(c.type) ? `ST_AsText(${myQuote(c.name)})` : `CAST(${myQuote(c.name)} AS CHAR)`;
-      return `, 'c${i}', COUNT(${myQuote(c.name)}), 'd${i}', COUNT(DISTINCT ${myQuote(c.name)}), 'l${i}', COALESCE(SUM(LENGTH(${v})), 0), 'lo${i}', MIN(${v}), 'hi${i}', MAX(${v})`;
-    }).join('')}) FROM ${myQuote(name)};`,
-    normalizeLockTable: (t) => t,
-    shell: (c) => `docker exec -it ${c} ${eng.bin} -h127.0.0.1 -uroot -p${PASSWORD} ${DATABASE}`,
-    // Newer MariaDB images ship `mariadb` without the `mysql` name.
-    detect: async (c) => {
-      if (eng.binFound) return;
-      const found = await docker(['exec', c, 'sh', '-c', 'command -v mariadb || command -v mysql']);
-      if (found.code === 0 && found.out.trim()) { eng.bin = found.out.trim().split('/').pop(); eng.binFound = true; }
-    },
-    // The metadata-lock instrument is off by default in MySQL 5.7, and MariaDB reports locks through a plugin.
-    // Returns why locks cannot be read, or null.
-    setup: async (c) => {
-      const sql = maria ? "INSTALL SONAME 'metadata_lock_info'" : "UPDATE performance_schema.setup_instruments SET ENABLED = 'YES', TIMED = 'YES' WHERE NAME = 'wait/lock/metadata/sql/mdl'";
-      const r = await docker(eng.base(c, ['-e', sql]));
-      return r.code === 0 ? null : firstLines(r.err || r.out, 2);
-    },
-    probe: {
-      create: `CREATE TABLE ${PROBE_TABLE} (id int) ENGINE=InnoDB;`, drop: `DROP TABLE ${PROBE_TABLE};`,
-      hold: `LOCK TABLES ${PROBE_TABLE} WRITE;\nSELECT SLEEP(3);\nUNLOCK TABLES;\n`,
-    },
-  };
-  return eng;
-};
-
 // ── a second session that polls the lock tables while a migration runs ───────────────────────────────────
 
 const startPoller = (eng, c) => {
@@ -219,20 +125,21 @@ const startPoller = (eng, c) => {
   let rows = [];
   let buf = '';
   let errText = '';
-  const state = { stopped: false, died: false, error: null };
+  const state = { stopped: false, died: false, error: null, tail: '' };
   child.stdin.on('error', () => {});
   child.stderr.setEncoding('utf8').on('data', (d) => { errText += d; state.error = firstLines(errText, 2) || null; });
   child.stdout.setEncoding('utf8').on('data', (d) => {
+    state.tail = `${state.tail}${d}`.slice(-400);
     buf += d;
     let i;
     while ((i = buf.indexOf('\n')) !== -1) {
-      const line = buf.slice(0, i).replace(/\r$/, '');
+      const line = (eng.cleanLine ?? ((l) => l))(buf.slice(0, i).replace(/\r$/, '')).trimEnd();
       buf = buf.slice(i + 1);
       if (line === '@@END') {
         samples.push({ t: performance.now(), rows });
         rows = [];
         setTimeout(send, POLL_PAUSE_MS);
-      } else if (line) rows.push(line.split('\t'));
+      } else if (line.includes('\t')) rows.push(line.split('\t').map((f) => f.trimEnd()));
     }
   });
   child.on('close', () => { if (!state.stopped) state.died = true; });
@@ -283,14 +190,15 @@ const run = async (args, input, what) => {
 const snapshotOf = async (eng, c) => {
   const meta = await run(eng.queryArgs(c), eng.metaSql, 'reading the schema');
   const tables = new Map();
-  for (const [schema, table, name, type] of rows(meta).map((l) => l.split('\t'))) {
+  // a client can print more than the rows (notices, warnings): only a line with all four fields is a column
+  for (const [schema, table, name, type] of rows(meta).map((l) => l.split('\t').map((f) => f.trimEnd())).filter((f) => f.length === 4)) {
     const key = eng.tableKey(schema, table);
     if (!tables.has(key)) tables.set(key, { schema, name: table, cols: [] });
     tables.get(key).cols.push({ name, type });
   }
   const stats = new Map();
   if (tables.size) {
-    const out = await run(eng.queryArgs(c), [...tables].map(([key, t]) => eng.statsSql(key, t, t.cols)).join('\n'), 'counting rows');
+    const out = await run(eng.queryArgs(c), (eng.q ?? ((s) => s))([...tables].map(([key, t]) => eng.statsSql(key, t, t.cols)).join('\n')), 'counting rows');
     for (const line of rows(out)) { try { const o = JSON.parse(line); stats.set(o.t, o); } catch { /* not a result row */ } }
   }
   const snap = new Map();
@@ -298,7 +206,7 @@ const snapshotOf = async (eng, c) => {
     const s = stats.get(key) ?? { n: 0 };
     snap.set(key, {
       rows: Number(s.n),
-      columns: new Map(t.cols.map((col, i) => [col.name, {
+      columns: new Map(t.cols.map((col, i) => [eng.fold ? eng.fold(col.name) : col.name, {
         type: col.type, notnull: false, nonNull: Number(s[`c${i}`] ?? 0),
         fingerprint: [s[`d${i}`], s[`l${i}`], s[`lo${i}`], s[`hi${i}`]].join('|'),
       }])),
@@ -318,7 +226,10 @@ const waitReady = async (eng, name, timeoutMs) => {
     await eng.detect?.(name);
     const r = await docker(eng.readyArgs(name), { timeoutMs: 30000 });
     if (r.code === 0 && /\b1\b/.test(r.out)) return;
-    if (Date.now() - t0 > timeoutMs) throw new RehearsalUsageError(`${eng.label} did not accept connections within ${Math.round(timeoutMs / 1000)} s (${firstLines(r.err, 2)})`);
+    if (Date.now() - t0 > timeoutMs) {
+      const logs = await docker(['logs', '--tail', '6', name], { timeoutMs: 30000 });
+      throw new RehearsalUsageError(`${eng.label} did not accept connections within ${Math.round(timeoutMs / 1000)} s (${firstLines(r.err || r.out, 2)}; the container's last log lines: ${firstLines(`${logs.out}\n${logs.err}`.split(/\r?\n/).slice(-8).join('\n'), 6)})`);
+    }
     await sleep(500);
   }
 };
@@ -338,21 +249,25 @@ const isPgCustomDump = (file) => {
 const loadSeed = async (eng, name, file, dump, print) => {
   const gz = /\.gz$/i.test(file);
   if (dump && eng.kind === 'postgres' && !gz && isPgCustomDump(file)) {
-    const r = await docker(['exec', '-i', '-e', `PGPASSWORD=${PASSWORD}`, name, 'pg_restore', '-h', '127.0.0.1', '-U', 'postgres', '-d', DATABASE, '--no-owner', '--no-privileges'], { stream: createReadStream(file), timeoutMs: 3600000 });
+    const r = await docker(eng.restoreArgs(name), { stream: createReadStream(file), timeoutMs: 3600000 });
     const errors = r.err.split(/\r?\n/).filter((l) => /error/i.test(l));
     if (r.code !== 0 || errors.length) print(`seed: pg_restore exited ${r.code} with ${errors.length} error line(s)`);
     return;
   }
-  const args = eng.scriptArgs(name, { app: 'msafe-seed', stopOnError: !dump, wrap: false });
+  const args = eng.scriptArgs(name, { app: SEED_APP, stopOnError: !dump, wrap: false, dump });
   let r;
   if (dump) r = await docker(args, { stream: gz ? createReadStream(file).pipe(createGunzip()) : createReadStream(file), timeoutMs: 3600000 });
   else {
-    r = await docker(args, { input: decodeSql(gz ? gunzipSync(readFileSync(file)) : readFileSync(file)) });
+    const text = decodeSql(gz ? gunzipSync(readFileSync(file)) : readFileSync(file));
+    r = await docker(args, { input: eng.seedInput ? eng.seedInput(text) : text });
   }
-  if (!dump && r.code !== 0) throw new RehearsalUsageError(`the seed ${file} did not load: ${firstLines(r.err || r.out, 3)}`);
-  const errors = eng.errorLines(r.err);
+  if (!dump && r.code !== 0) throw new RehearsalUsageError(`the seed ${file} did not load: ${failText(eng, r)}`);
+  const errors = eng.errorLines(eng.errorsOnStdout ? `${r.err}\n${r.out}` : r.err);
   if (dump && errors.length) print(`seed: the dump loaded with ${errors.length} error line(s), first ${eng.describeError(errors[0])}`);
 };
+
+// Why a client run failed: the engine knows where its client writes errors.
+const failText = (eng, r) => (eng.failText ? eng.failText(r) : firstLines(r.err || r.out, 3));
 
 const statementCount = (file, kind, dialect) => parse(partFor(file, kind, dialect).sql, { dialect }).statements.length;
 
@@ -365,7 +280,8 @@ export const rehearseDocker = async (opts, print) => {
   if (!source || !ups.length) throw new RehearsalUsageError('a seed (or --dump file) and at least one migration are needed');
   if (opts.runner && !RUNNER_IDS.includes(opts.runner)) throw new RehearsalUsageError(`unknown runner ${opts.runner}`);
   for (const f of [source, ...ups, ...(Array.isArray(downs) ? downs : [])]) if (!existsSync(f)) throw new RehearsalUsageError(`${f} does not exist`);
-  const eng = makeEngine(spec);
+  const eng = makeEngine(spec, { edition: opts.edition });
+  eng.checkSeed?.(seedBytes(source));
   const downFiles = downs === 'sections' ? ups : downs;
   if (downs === 'sections') for (const f of ups) if (!partFor(f, 'down', eng.dialect).hasDown) throw new RehearsalUsageError(`${f} has no down section: pass the down files after --down`);
   for (const f of ups) if (statementCount(f, 'up', eng.dialect) === 0) throw new RehearsalUsageError(`${f} has no SQL statements, so there is nothing to rehearse`);
@@ -387,13 +303,24 @@ export const rehearseDocker = async (opts, print) => {
   let finished = false;
   try {
     // Data lives in memory (much faster to initialise and load) unless the seed is too big for that or --disk is given.
-    // No network: the database is reached with docker exec only, so a --keep'd copy of production data is not reachable from other containers.
+    // No network (or, for the engines that need an interface, an internal one): the database is reached with docker exec only, so a --keep'd copy of production data is not reachable from other containers.
     const tmpfs = opts.disk !== true && seedBytes(source) <= TMPFS_SEED_LIMIT;
-    const started = await docker(['run', '-d', '--name', name, '--label', 'msafe-rehearse=1', '--network', 'none', ...eng.runArgs({ tmpfs })], { timeoutMs: 120000 });
+    // Oracle's instance fails (ORA-00600 ksipc) without a non-loopback interface: it gets a private network with no
+    // outside access that nothing else is attached to, which keeps the data as unreachable as --network none does.
+    if (eng.needsNetwork) {
+      const net = await docker(['network', 'create', '--internal', '--label', 'msafe-rehearse=1', '--label', `msafe-owner=${OWNER}`, name], { timeoutMs: 60000 });
+      if (net.code !== 0) throw new RehearsalUsageError(`could not create the private network for ${spec.image}: ${firstLines(net.err, 2)}`);
+      liveNets.add(name);
+    }
+    const started = await docker(['run', '-d', '--name', name, '--label', 'msafe-rehearse=1', '--label', `msafe-owner=${OWNER}`, '--network', eng.needsNetwork ? name : 'none', ...eng.runArgs({ tmpfs })], { timeoutMs: 120000 });
     if (started.code !== 0) throw new RehearsalUsageError(`could not start ${spec.image}: ${firstLines(started.err, 2)}`);
     print(`runner: ${profile.label} (${detected.evidence}) · engine ${spec.image} in container ${name}`);
-    await waitReady(eng, name, opts.startupTimeoutMs ?? 240000);
+    await waitReady(eng, name, opts.startupTimeoutMs ?? eng.startupMs ?? 240000);
     const setupError = await eng.setup(name);
+    const verified = await eng.verify?.(name);
+    if (verified?.error) throw new RehearsalUsageError(verified.error);
+    if (verified?.note) print(verified.note);
+    if (eng.editionNote) print(eng.editionNote);
     const t0 = performance.now();
     await loadSeed(eng, name, source, opts.dump === true, print);
     let current = await snapshotOf(eng, name);
@@ -419,29 +346,45 @@ export const rehearseDocker = async (opts, print) => {
       if (!seen) await sleep(100);
     }
     await holder;
-    await docker(eng.scriptArgs(name, { app: 'msafe-seed', stopOnError: true, wrap: false }), { input: eng.probe.drop });
-    if (!seen) throw new RehearsalUsageError(`lock measurement failed its self-test: a lock held on a probe table was not seen by the polling session (${poller.state.error ?? setupError ?? (poller.state.died ? 'the polling session ended' : 'no row returned')}); nothing was measured, so nothing is reported`);
+    // a second proof for engines that report a state after the migration (Db2 REORG-pending): provoke it on the probe table
+    let pendingSeen = true;
+    if (eng.pendingProbe) {
+      await docker(eng.scriptArgs(name, { app: SEED_APP, stopOnError: true, wrap: false }), { input: eng.pendingProbe.sql });
+      pendingSeen = (await eng.pending(name)).includes(eng.pendingProbe.table);
+    }
+    await docker(eng.scriptArgs(name, { app: SEED_APP, stopOnError: true, wrap: false }), { input: eng.probe.drop });
+    if (!seen) throw new RehearsalUsageError(`lock measurement failed its self-test: a lock held on a probe table was not seen by the polling session (${poller.state.error ?? setupError ?? (poller.state.died ? 'the polling session ended' : `no row returned in ${poller.samples.length} poll(s); the session's last output: ${poller.state.tail.replace(/\s+/g, ' ').trim().slice(-160) || 'none'}`)}); nothing was measured, so nothing is reported`);
+    if (!pendingSeen) throw new RehearsalUsageError('REORG-pending detection failed its self-test: a DROP COLUMN on a probe table was not reported as REORG pending; migrations that leave a table unusable would pass unnoticed, so nothing is reported');
+    let pendingNow = new Set();
 
     let failed = 0;
     let unmeasured = 0;
     const apply = async (file, kind) => {
       const part = partFor(file, kind, eng.dialect);
-      const wrap = wrapsFile(profile, { noTransaction: part.markers.noTransaction, statements: part.statements });
-      const { input, marked } = eng.scriptInput(part.sql, { wrap, marks: true });
+      const wrap = wrapsFile(profile, { noTransaction: part.markers.noTransaction, statements: part.statements, dialect: eng.dialect });
+      const { input, marked, error } = eng.scriptInput(part.sql, { wrap, marks: true });
+      if (error) {
+        failed++;
+        print(`FAILED  ${kind.padEnd(4)} ${file}: ${error}`);
+        return false;
+      }
       const before = current;
       const a = performance.now();
       const r = await docker(eng.scriptArgs(name, { app: MIGRATION_APP, stopOnError: true, wrap }), { input, timeoutMs: 3600000 });
       const b = performance.now();
       if (r.code !== 0) {
         failed++;
-        print(`FAILED  ${kind.padEnd(4)} ${file}: ${firstLines(r.err || r.out, 3)}`);
-        if (eng.dialect === 'mysql' && !wrap) print('          statements before the failing one stay applied: MySQL DDL commits implicitly');
+        print(`FAILED  ${kind.padEnd(4)} ${file}: ${failText(eng, r)}`);
+        if (eng.implicitCommit && !wrap) print(`          statements before the failing one stay applied: ${eng.label} DDL commits implicitly`);
         return false;
       }
       // duration measured inside the server, between two marks of the same session
       const t = (tag) => Number(r.out.match(new RegExp(`^@@${tag} ([\\d.]+)`, 'm'))?.[1]);
       const ms = marked && t('T1') >= t('T0') ? (t('T1') - t('T0')) * 1000 : Math.max(0, b - a - overhead);
       current = await snapshotOf(eng, name);
+      const pendingAll = eng.pending ? await eng.pending(name) : [];
+      const fresh = pendingAll.filter((tbl) => !pendingNow.has(tbl));
+      pendingNow = new Set(pendingAll);
       const { lines, lost } = diff(before, current, kind, allowLoss);
       await sleep(POLL_PAUSE_MS * 2);
       const window = poller.samples.filter((s) => s.t >= a && s.t <= b + 200);
@@ -452,11 +395,12 @@ export const rehearseDocker = async (opts, print) => {
       else if (poller.state.died) notMeasured = 'the polling session ended';
       else if (b - a >= 300 && window.length < 2) notMeasured = `${window.length} poll(s) during a ${Math.round(b - a)} ms migration`;
       if (notMeasured) unmeasured++;
-      const bad = lost.length || over.length || notMeasured;
+      const bad = lost.length || over.length || notMeasured || fresh.length;
       if (bad) failed++;
-      print(`${lost.length ? 'LOST   ' : over.length ? 'LOCKED ' : notMeasured ? 'UNMEAS.' : 'ran    '} ${kind.padEnd(4)} ${file} in ${ms.toFixed(0)} ms`);
+      print(`${lost.length ? 'LOST   ' : over.length ? 'LOCKED ' : fresh.length ? 'PENDING' : notMeasured ? 'UNMEAS.' : 'ran    '} ${kind.padEnd(4)} ${file} in ${ms.toFixed(0)} ms`);
       lines.forEach((l) => print(`          ${l}`));
       lost.forEach((l) => print(`          lost: ${l}`));
+      fresh.forEach((tbl) => print(`          REORG PENDING: ${tbl} is unusable until a classic REORG TABLE completes (SQLSTATE 57007): the migration needs CALL SYSPROC.ADMIN_CMD('REORG TABLE ${tbl}')`));
       held.forEach((l) => print(`          lock: ${l.modes.join(' + ')} on ${l.table} held ~${(l.ms / 1000).toFixed(2)} s (${l.polls} poll(s))${l.ms > budget ? `, over the ${seconds(budget)} s budget` : ''}`));
       if (notMeasured) print(`          lock: NOT MEASURED (${notMeasured}): this migration's locks are unknown`);
       else if (!held.length) print(`          lock: no write-blocking lock seen on tables that existed before (polled every ~${Math.round(pollGap(window))} ms)`);
@@ -486,10 +430,12 @@ export const rehearseDocker = async (opts, print) => {
     poller?.stop();
     if (opts.keep && finished) {
       live.delete(name);
-      print(`container ${name} kept for inspection (password ${PASSWORD}, no network: use docker exec).\n  connect: ${eng.shell(name)}\n  remove:  docker rm -f -v ${name}`);
+      liveNets.delete(name);
+      print(`container ${name} kept for inspection (password ${eng.password}, ${eng.needsNetwork ? 'a private internal network with no outside access' : 'no network'}: use docker exec).\n  connect: ${eng.shell(name)}\n  remove:  docker rm -f -v ${name}${eng.needsNetwork ? ` && docker network rm ${name}` : ''}`);
     } else {
       await docker(['rm', '-f', '-v', name], { timeoutMs: 120000 }).catch(() => {});
       live.delete(name);
+      if (liveNets.has(name)) { await docker(['network', 'rm', name], { timeoutMs: 60000 }).catch(() => {}); liveNets.delete(name); }
       if (opts.keep) print(`the run did not finish, so container ${name} was removed`);
     }
   }

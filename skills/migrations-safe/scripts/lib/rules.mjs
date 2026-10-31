@@ -1,10 +1,17 @@
 // The rule registry and the per-file rules. Every rule id that can be emitted is listed in RULES; the
 // table in references/rules.md is checked against it by the test suite.
-import { DIALECTS, fileDialectDirective, profileOf, sniffDialect, wrapsFile } from './runners.mjs';
+import { DIALECTS, profileOf, resolveDialect, wrapsFile, wrapsFor } from './runners.mjs';
 import { flat, ident, name, parse, splitTopLevel, stripLiterals } from './parse.mjs';
 import { applySchema, cloneSchema, insertTargets, parseAlter } from './schema.mjs';
 import { DEFAULT_MYSQL_VERSION, INDEX_STATEMENT, enumOf, learnStatement, parseMysqlVersion } from './mysql.mjs';
 import { GOT, mysqlAlterRules as mysqlRules } from './mysql-rules.mjs';
+import { DEFAULT_EDITION, DEFAULT_SERVER_VERSION, parseServerVersion } from './server-version.mjs';
+import { learnTsql, normalizeTsqlActions, spRename } from './mssql.mjs';
+import { DROP_COLUMN_NOTE, mssqlAlterRules, mssqlIndexRules } from './mssql-rules.mjs';
+import { COMMITS, DDL_LOCK_TIMEOUT, isDdl, isDml } from './oracle.mjs';
+import { oracleAlterRules, oracleStatementRules } from './oracle-rules.mjs';
+import { COMMIT, INPLACE, LOCK_TIMEOUT as DB2_LOCK_TIMEOUT, REORG_STATEMENT, REORG_UNIT_LIMIT } from './db2.mjs';
+import { db2AlterRules } from './db2-rules.mjs';
 
 export const ERROR = 'error';
 export const WARN = 'warning';
@@ -45,6 +52,26 @@ export const RULES = [
   { id: 'mysql-column-position', level: WARN, area: 'lock' },
   { id: 'mysql-instant-row-versions', level: WARN, area: 'lock' },
   { id: 'mysql-change-column-rename', level: WARN, area: 'running code' },
+  { id: 'mssql-add-not-null-default', level: ERROR, area: 'lock' },
+  { id: 'mssql-alter-column', level: ERROR, area: 'lock' },
+  { id: 'mssql-index-offline', level: ERROR, area: 'lock' },
+  { id: 'mssql-online-unsupported-edition', level: ERROR, area: 'lock' },
+  { id: 'mssql-lock-timeout', level: WARN, area: 'lock' },
+  { id: 'mssql-constraint-with-check', level: ERROR, area: 'lock' },
+  { id: 'mssql-constraint-nocheck', level: WARN, area: 'lock' },
+  { id: 'oracle-add-column-default', level: ERROR, area: 'lock' },
+  { id: 'oracle-ddl-lock-timeout', level: WARN, area: 'lock' },
+  { id: 'oracle-ddl-commits-dml', level: WARN, area: 'transaction' },
+  { id: 'oracle-index-not-online', level: ERROR, area: 'lock' },
+  { id: 'oracle-online-unsupported-edition', level: ERROR, area: 'lock' },
+  { id: 'oracle-constraint-validate', level: ERROR, area: 'lock' },
+  { id: 'oracle-drop-column-rewrites', level: WARN, area: 'lock' },
+  { id: 'oracle-missing-slash', level: ERROR, area: 'tool' },
+  { id: 'db2-reorg-pending', level: ERROR, area: 'lock' },
+  { id: 'db2-reorg-offline', level: WARN, area: 'lock' },
+  { id: 'db2-reorg-limit', level: ERROR, area: 'lock' },
+  { id: 'db2-constraint-check', level: ERROR, area: 'lock' },
+  { id: 'db2-lock-timeout', level: WARN, area: 'lock' },
   { id: 'missing-lock-timeout', level: WARN, area: 'lock' },
   { id: 'concurrently-in-transaction', level: ERROR, area: 'transaction' },
   { id: 'transaction-conflict', level: WARN, area: 'transaction' },
@@ -53,6 +80,7 @@ export const RULES = [
   { id: 'applied-migration-changed', level: ERROR, area: 'history' },
   { id: 'out-of-order', level: ERROR, area: 'history' },
   { id: 'duplicate-sequence', level: ERROR, area: 'history' },
+  { id: 'unsupported-separator', level: WARN, area: 'transaction' },
   { id: 'invalid-directive', level: WARN, area: 'tool' },
   { id: 'unlinted-migration', level: WARN, area: 'tool' },
 ];
@@ -63,7 +91,7 @@ const VOLATILE_FN = /\b(?:random|setseed|gen_random_uuid|uuid_generate_v\w+|cloc
 const DEFAULT_END = /\b(?:not null|null|check|references|unique|primary key|constraint|collate|generated|on update)\b/i;
 const NON_COLUMN_ADD = /^(?:constraint|index|key|unique|primary|foreign|check|fulltext|spatial|partition)\b/i;
 const NOT_COLUMN_DROP = /^drop (?:constraint|index|key|default|not null|primary|foreign|check|partition|expression|identity)\b/i;
-const NON_DDL = /^(?:begin|start transaction|commit|set\b|pragma\b|select\b)/i;
+const NON_DDL = /^(?:begin|start transaction|commit|rollback|alter\s+session\b|call\b|reorg\b|runstats\b|connect\b|terminate\b|end\b|if\b|else\b|use\b|print\b|declare\b|:\w|@|prompt\b|whenever\b|spool\b|exit\b|quit\b|rem\b|define\b|set\b|pragma\b|select\b)/i;
 const TX_START =/^(?:begin|start transaction)\b/i;
 const LOCK_TIMEOUT = /^(?:set\s+(?:session\s+|local\s+)?lock_timeout\b|select\s+set_config\s*\(\s*'lock_timeout')/i;
 const MYSQL_LOCK_WAIT = /^(?:set\s+(?:session\s+|local\s+|@@session\.|@@local\.|@@)?lock_wait_timeout\s*=|set\s+statement\b.*\block_wait_timeout\s*=)/i;
@@ -85,6 +113,8 @@ const sourceTables = (texts) => {
     if (ins) copiedFrom.set(name(ins[2]), name(ins[1]));
     const ren = t.match(new RegExp(String.raw`^alter table (${ident}) rename to (${ident})`, 'i'));
     if (ren) renamedTo.set(name(ren[1]), name(ren[2]));
+    const sp = spRename(t);
+    if (sp?.kind === 'object') renamedTo.set(sp.table, name(sp.to));
   }
   return { copiedFrom, renamedTo };
 };
@@ -119,16 +149,27 @@ const parseDirectives = (directives, add) => {
 
 // Lints the up part of one migration. ctx: { dialect, projectDialect, profile, schema, createdBefore }.
 export const lintSql = (sql, ctx = {}) => {
-  const requested = ctx.dialect ?? fileDialectDirective(sql) ?? ctx.projectDialect;
-  const dialect = DIALECTS.includes(requested) ? requested : sniffDialect(sql);
+  const dialect = resolveDialect(sql, ctx);
   const pg = dialect === 'postgres';
   const my = dialect === 'mysql';
+  const ms = dialect === 'mssql';
+  const ora = dialect === 'oracle';
+  const db2 = dialect === 'db2';
+  // REORG-recommended units of work per table since its last REORG, kept across the files of one run
+  const reorgUnits = ctx.reorgUnits ?? new Map();
+  const pendingReorg = new Map();
+  const countedUnit = new Map();
+  let unit = 0;
+  const serverVersion = ctx.serverVersion ?? parseServerVersion(dialect, DEFAULT_SERVER_VERSION[dialect]);
+  const edition = ctx.edition ?? DEFAULT_EDITION[dialect];
   const mysqlVersion = ctx.mysqlVersion ?? parseMysqlVersion(DEFAULT_MYSQL_VERSION);
   // State that outlives one file: instant row versions, ENUM definitions and indexed columns per table.
   const instantVersions = ctx.instantVersions ?? new Map();
   const enums = ctx.enums ?? new Map();
   const indexed = ctx.indexed ?? new Map();
   const defs = ctx.defs ?? new Map();
+  // SQL Server column definitions per `table.column`, kept across the files of one run
+  const tsql = ctx.tsql ?? new Map();
   const maps = { enums, indexed, defs, instantVersions };
   let fkChecksOff = false;
   const profile = ctx.profile ?? profileOf('raw');
@@ -146,9 +187,10 @@ export const lintSql = (sql, ctx = {}) => {
   const noTransaction = markers.noTransaction || ctx.noTransaction === true || flywayAutoCommit;
   // SQL a runner generated (stdin) shows its own transaction: BEGIN/COMMIT present means wrapped.
   const generated = ctx.generated === true && profile.generatesSql;
-  const wrapped = !generated && wrapsFile(profile, { noTransaction, statements: statements.length });
-  const explicitWrap = !generated && profile.wraps === true && !noTransaction;
-  const explicitTx = texts.some((t) => TX_START.test(t));
+  const wrapped = !generated && wrapsFile(profile, { noTransaction, statements: statements.length, dialect });
+  const explicitWrap = !generated && wrapsFor(profile, dialect) === true && !noTransaction;
+  // in Oracle BEGIN opens a PL/SQL block, never a transaction (there is no BEGIN TRANSACTION)
+  const explicitTx = !ora && texts.some((t) => TX_START.test(t));
 
   let directiveState;
   const add = (k, rule, message, extra = {}) => {
@@ -181,15 +223,31 @@ export const lintSql = (sql, ctx = {}) => {
     state: { enums, indexed, defs, instantVersions },
   });
 
-  const alterRules = (k, table, actions, text) => {
+  const alterRules = (k, table, rawActions, text) => {
     const existing = isExisting(table);
+    const actions = ms ? normalizeTsqlActions(rawActions) : rawActions;
     if (my && existing) mysqlAlterRules(k, table, actions);
+    if (db2 && existing) {
+      const ops = db2AlterRules({ add: (rule, message, extra) => add(k, rule, message, extra), table, actions });
+      if (ops.length) {
+        if (!pendingReorg.has(table)) pendingReorg.set(table, { k, op: ops[0] });
+        if (countedUnit.get(table) !== unit) {
+          countedUnit.set(table, unit);
+          const n = (reorgUnits.get(table) ?? 0) + 1;
+          reorgUnits.set(table, n);
+          if (n > REORG_UNIT_LIMIT)
+            add(k, 'db2-reorg-limit', `this is the ${n}th unit of work with a REORG-recommended operation (${ops[0]}) on ${table} since its last REORG TABLE: Db2 allows ${REORG_UNIT_LIMIT} and then fails with SQLSTATE 55019 until a classic offline REORG TABLE has run — put CALL SYSPROC.ADMIN_CMD('REORG TABLE ${table}') between the groups, or group the operations into one unit of work (they count once)`);
+        }
+      }
+    }
+    if (ora && existing) oracleAlterRules({ add: (rule, message, extra) => add(k, rule, message, extra), table, actions, version: serverVersion, text, edition });
+    if (ms && existing) mssqlAlterRules({ add: (rule, message, extra) => add(k, rule, message, extra), table, actions, version: serverVersion, edition, defs: tsql });
     if (dialect === 'mysql' && !/\balgorithm\s*=/i.test(text))
       add(k, 'mysql-no-algorithm', `ALTER TABLE ${table} without ALGORITHM/LOCK may copy the table under lock: declare ALGORITHM=INSTANT (alone, it takes no LOCK clause) or ALGORITHM=INPLACE, LOCK=NONE so it fails instead; for a COPY on a big table use gh-ost`);
     for (const a of actions) {
       let m;
       if (/^drop column\b/i.test(a) || (/^drop\s+\S/i.test(a) && !NOT_COLUMN_DROP.test(a)))
-        add(k, 'drop-column', `drops a column of ${table}: the running code still selects or inserts it — contract step only, after a release that stopped using it, with a backup and a recorded approval`);
+        add(k, 'drop-column', `drops a column of ${table}: the running code still selects or inserts it — contract step only, after a release that stopped using it, with a backup and a recorded approval${ms ? DROP_COLUMN_NOTE : ''}`);
       const renamesColumn = a.match(/^rename (?:column )?(?!to\b|constraint\b|as\b|index\b|key\b)\S+ to \S+/i)
         || (dialect === 'mysql' && (m = a.match(/^change (?:column )?(\S+) (\S+)/i)) && name(m[1]) !== name(m[2]));
       if (renamesColumn)
@@ -238,15 +296,24 @@ export const lintSql = (sql, ctx = {}) => {
 
   let firstLock = -1;
   let lockTimeoutAt = -1;
+  let pendingDml = -1;
   let reportedTx = false;
   let reportedPragma = false;
   texts.forEach((t, k) => {
     const b = bare[k];
+    if (db2 && k > 0 && (!wrapped || COMMIT.test(texts[k - 1]))) unit++;
+    if (ora && !statements[k].command) {
+      if (pendingDml !== -1 && isDdl(t))
+        add(k, 'oracle-ddl-commits-dml', `a DDL statement commits the transaction: the DML at line ${statements[pendingDml].line} (and everything since the last COMMIT) is committed here, so a failure afterwards does not roll it back — COMMIT it on purpose before the DDL, or move the data change to its own migration`);
+      if (isDml(t) && !statements[k].inner) { if (pendingDml === -1) pendingDml = k; }
+      else if (isDdl(t) || COMMITS.test(t)) pendingDml = -1;
+    }
     const fkSwitch = t.match(FK_CHECKS);
     if (fkSwitch) fkChecksOff = /^(?:0|off|false)$/i.test(fkSwitch[1]);
     const create = t.match(new RegExp(String.raw`^create (?:temp(?:orary)? |unlogged )?table (?:if not exists )?(${ident})`, 'i'));
     if (create) {
       created.add(name(create[1])); createdHere.add(name(create[1])); applySchema(tables, t);
+      if (ms) learnTsql(t, tsql);
       if (my) learnStatement(t, maps, mysqlVersion);
       return;
     }
@@ -257,6 +324,34 @@ export const lintSql = (sql, ctx = {}) => {
       if (isExisting(alter.table) && firstLock === -1) firstLock = k;
       if (alter.wait && lockTimeoutAt === -1) lockTimeoutAt = k;
       if (my && !isExisting(alter.table)) learnStatement(t, maps, mysqlVersion);
+      if (ms) learnTsql(t, tsql);
+    }
+    if (ms) {
+      if (mssqlIndexRules({ add: (rule, message, extra) => add(k, rule, message, extra), text: t, isExisting, edition }) && firstLock === -1) firstLock = k;
+      if (/\bwait_at_low_priority\b/i.test(t) && lockTimeoutAt === -1) lockTimeoutAt = k;
+      const sp = spRename(t);
+      if (sp?.kind === 'column' && isExisting(sp.table))
+        add(k, 'rename-column', `renames a column of ${sp.table} in one step (sp_rename): the code in production still uses the old name — expand (add new, write both, backfill), switch reads, contract later`);
+      if (sp?.kind === 'object' && !created.has(sp.table) && !rebuilt(name(sp.to)))
+        add(k, 'rename-table', `renames table ${sp.table} in one step (sp_rename): create the new one (or a view with the old name) and move readers first`);
+      if (sp && firstLock === -1 && isExisting(sp.table)) firstLock = k;
+    }
+    if (db2) {
+      const reorg = t.match(REORG_STATEMENT);
+      if (reorg) {
+        const table = name(reorg[1]);
+        pendingReorg.delete(table);
+        reorgUnits.set(table, 0);
+        if (isExisting(table) && firstLock === -1) firstLock = k;
+        if (!INPLACE.test(t))
+          add(k, 'db2-reorg-offline', `a classic REORG TABLE rewrites ${table} and blocks writers for as long as it takes (the table is read-only at best): run it in a window, and size the window from a rehearsal on a copy of production data`, { level: WARN });
+      }
+    }
+    if (ora) {
+      const stmt = statements[k];
+      if (stmt.plsql && stmt.slash === false)
+        add(k, 'oracle-missing-slash', 'a PL/SQL block (or CREATE PROCEDURE/FUNCTION/TRIGGER/PACKAGE/TYPE) must end with a `/` on a line of its own: without it SQL*Plus and Flyway keep reading, and the statements that follow become part of the block');
+      if (oracleStatementRules({ add: (rule, message, extra) => add(k, rule, message, extra), text: t, isExisting, edition }) && firstLock === -1) firstLock = k;
     }
     if (my) {
       const optimize = t.match(new RegExp(String.raw`^optimize (?:(?:no_write_to_binlog|local) )?table (.*)$`, 'i'));
@@ -326,7 +421,7 @@ export const lintSql = (sql, ctx = {}) => {
       reportedPragma = true;
       add(k, 'transaction-conflict', `PRAGMA foreign_keys is a no-op inside the transaction ${profile.label} wraps around the file, so DROP TABLE still runs ON DELETE CASCADE / SET NULL on child rows. Run the rebuild in the runner's no-transaction mode, where foreign_keys=OFF takes effect (PRAGMA defer_foreign_keys only helps plain NO ACTION foreign keys), and rehearse it with real child rows`, { level: copiedFrom.size ? ERROR : WARN });
     }
-    if ((my ? MYSQL_LOCK_WAIT : LOCK_TIMEOUT).test(t) && lockTimeoutAt === -1) lockTimeoutAt = k;
+    if ((my ? MYSQL_LOCK_WAIT : ora ? DDL_LOCK_TIMEOUT : db2 ? DB2_LOCK_TIMEOUT : LOCK_TIMEOUT).test(t) && lockTimeoutAt === -1) lockTimeoutAt = k;
     applySchema(tables, t);
   });
 
@@ -335,14 +430,35 @@ export const lintSql = (sql, ctx = {}) => {
       ? `DDL on an existing table without SET SESSION lock_wait_timeout: the statement waits for the table's metadata lock behind any open transaction (even an idle one) and every later query on the table queues behind it — SET SESSION lock_wait_timeout = 5 (MariaDB also accepts \`WAIT 5\` on the ALTER) and retry with backoff`
       : 'lock_wait_timeout is set after the first DDL on an existing table, so that statement waits for its lock without a limit: move the SET before it', { line: statements[firstLock].line });
 
+  for (const [table, p] of pendingReorg)
+    add(p.k, 'db2-reorg-pending', `${p.op} puts ${table} in REORG-pending state: until a classic REORG TABLE completes, most operations on it fail with SQLSTATE 57007 (reads are limited to table scans) — follow the statement with CALL SYSPROC.ADMIN_CMD('REORG TABLE ${table}') in this migration, and rehearse how long it takes`);
+
+  if (db2 && firstLock !== -1 && (lockTimeoutAt === -1 || lockTimeoutAt > firstLock))
+    add(firstLock, 'db2-lock-timeout', lockTimeoutAt === -1
+      ? "DDL on an existing table without SET CURRENT LOCK TIMEOUT: LOCKTIMEOUT defaults to -1, so the statement waits for its lock without limit behind any transaction holding the table, and every later query queues behind it — SET CURRENT LOCK TIMEOUT 5 first, and retry on failure"
+      : 'CURRENT LOCK TIMEOUT is set after the first DDL on an existing table, so that statement waits for its lock without a limit: move the SET before it', { line: statements[firstLock].line });
+
+  if (ora && firstLock !== -1 && (lockTimeoutAt === -1 || lockTimeoutAt > firstLock))
+    add(firstLock, 'oracle-ddl-lock-timeout', lockTimeoutAt === -1
+      ? "DDL on an existing table without ALTER SESSION SET DDL_LOCK_TIMEOUT: Oracle does not queue the statement, it fails at once with ORA-00054 (resource busy) when any transaction holds the table — the risk is a half-applied deploy (each DDL committed, the rest not run); ALTER SESSION SET DDL_LOCK_TIMEOUT = 30 makes it wait up to 30 s instead, and retry the whole migration on failure"
+      : 'DDL_LOCK_TIMEOUT is set after the first DDL on an existing table, so that statement fails at once on a busy table: move the ALTER SESSION before it', { line: statements[firstLock].line });
+
+  if (ms && firstLock !== -1 && (lockTimeoutAt === -1 || lockTimeoutAt > firstLock))
+    add(firstLock, 'mssql-lock-timeout', lockTimeoutAt === -1
+      ? "DDL on an existing table without SET LOCK_TIMEOUT: the statement waits for its schema lock behind any open transaction without a limit, and every later query on the table queues behind it — SET LOCK_TIMEOUT 5000 (milliseconds) first, or WAIT_AT_LOW_PRIORITY on the online rebuild / SWITCH (SQL Server 2014+), and retry on failure"
+      : 'LOCK_TIMEOUT is set after the first DDL on an existing table, so that statement waits for its lock without a limit: move the SET before it', { line: statements[firstLock].line });
+
   if (pg && firstLock !== -1 && (lockTimeoutAt === -1 || lockTimeoutAt > firstLock))
     add(firstLock, 'missing-lock-timeout', lockTimeoutAt === -1
       ? "ALTER TABLE on an existing table without SET lock_timeout: a long query ahead of it makes every read and write queue behind its lock — SET lock_timeout = '5s' and retry on failure"
       : 'lock_timeout is set after the first ALTER TABLE on an existing table, so that ALTER waits for its lock without a limit: move the SET before it', { line: statements[firstLock].line });
 
-  const ddl = texts.filter((t) => !/^(begin|start transaction|commit|set\b|pragma\b|select\b)/i.test(t));
+  const ddl = texts.filter((t) => !NON_DDL.test(t));
   const concurrent = texts.some((t) => /\bconcurrently\b/i.test(t));
-  if (dialect !== 'mysql' && ddl.length > 1 && !explicitTx && !concurrent && !wrapped)
+  const missing = profile.id === 'raw' ? [] : [...markers.separators].filter((s) => !profile.separators.includes(s));
+  if (missing.length)
+    add(0, 'unsupported-separator', `${missing.map((s) => (s === 'terminator' ? 'a custom statement terminator' : `\`${s}\``)).join(' and ')} in the file, but ${profile.label} does not split on it: the whole file reaches the driver as one statement and the server answers with a syntax error — use a runner that does (Flyway, Liquibase, DbUp), or send the file with sqlcmd/SQL*Plus/the Db2 CLP`);
+  if (dialect !== 'mysql' && dialect !== 'oracle' && ddl.length > 1 && !explicitTx && !concurrent && !wrapped)
     add(0, 'not-atomic', `${ddl.length} statements outside a transaction: a failure halfway leaves the schema between versions — BEGIN/COMMIT, or pass --runner (or add the runner's config file) when the runner wraps each file`);
 
   findings.sort((a, b) => a.line - b.line);

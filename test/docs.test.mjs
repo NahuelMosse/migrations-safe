@@ -8,7 +8,7 @@ import { FIXTURES, ROOT, SKILL, lintCli } from './helpers.mjs';
 const read = (p) => readFileSync(p, 'utf8');
 
 test('the rule table in references/rules.md is the rule registry', () => {
-  const rows = [...read(join(SKILL, 'references/rules.md')).matchAll(/^\| `([a-z-]+)` \| (error|warning) \|/gm)].map((m) => `${m[1]}:${m[2]}`);
+  const rows = [...read(join(SKILL, 'references/rules.md')).matchAll(/^\| `([a-z0-9-]+)` \| (error|warning) \|/gm)].map((m) => `${m[1]}:${m[2]}`);
   assert.deepEqual(rows.sort(), RULES.map((r) => `${r.id}:${r.level}`).sort());
 });
 
@@ -29,7 +29,7 @@ test('SKILL.md: frontmatter, size, variables and links', () => {
   assert.match(text, /Node 22\.13\+/);
   assert.match(text, /0 errors, or each remaining finding is allowed in the file with its\s+reason/);
   for (const [, link] of text.matchAll(/\]\((references\/[^)]+)\)/g)) assert.ok(existsSync(join(SKILL, link)), link);
-  for (const ref of ['rules', 'runners', 'rehearsal', 'mysql']) assert.ok(text.includes(`references/${ref}.md`));
+  for (const ref of ['rules', 'runners', 'rehearsal', 'mysql', 'mssql', 'oracle', 'db2']) assert.ok(text.includes(`references/${ref}.md`));
   assert.ok(!/db:migrate:status` \+/.test(text));
 });
 
@@ -58,7 +58,7 @@ test('packaging files agree with each other', () => {
 test('every eval case has a prompt and a grader', () => {
   const dir = join(ROOT, 'evals');
   const cases = readdirSync(dir, { withFileTypes: true }).filter((d) => d.isDirectory());
-  assert.equal(cases.length, 10);
+  assert.equal(cases.length, 13);
   // cases that need files or a repository seed their workspace with a scaffold
   for (const name of ['review-prisma-migration', 'sqlite-rehearsal', 'migration-number-collision', 'flyway-checksum-mismatch'])
     assert.ok(existsSync(join(dir, name, 'case.yaml')), `${name} needs a scaffold`);
@@ -84,7 +84,7 @@ const rulesOf = (dir, extra = []) => {
 };
 
 test('fixtures: good ones are clean even with --fail-on warning, bad ones fail with exactly the advertised rules', () => {
-  for (const dir of ['good/postgres', 'good/sqlite', 'good/mysql']) assert.deepEqual(rulesOf(dir, ['--strict']), { code: 0, found: [] }, dir);
+  for (const dir of ['good/postgres', 'good/sqlite', 'good/mysql', 'good/mssql', 'good/oracle', 'good/db2']) assert.deepEqual(rulesOf(dir, ['--strict']), { code: 0, found: [] }, dir);
   assert.deepEqual(rulesOf('bad/postgres').found, [
     'error:change-column-type', 'error:concurrently-in-transaction', 'error:constraint-without-not-valid', 'error:drop-column',
     'error:drop-table', 'error:index-without-concurrently', 'error:not-null-without-default', 'error:rename-column',
@@ -105,5 +105,25 @@ test('fixtures: good ones are clean even with --fail-on warning, bad ones fail w
     'warning:mysql-lock-wait-timeout', 'warning:mysql-lock-wait-timeout', 'warning:mysql-no-algorithm', 'warning:mysql-table-rebuild',
   ]);
   assert.deepEqual(rulesOf('bad/sqlite-rebuild').found, ['error:prisma-data-loss-warning', 'warning:missing-down', 'warning:not-atomic']);
-  for (const dir of ['bad/postgres', 'bad/sqlite', 'bad/postgres-locks', 'bad/mysql', 'bad/sqlite-rebuild']) assert.equal(rulesOf(dir).code, 1, dir);
+  assert.deepEqual(rulesOf('bad/mssql').found, [
+    'error:drop-column', 'error:mssql-add-not-null-default', 'error:mssql-alter-column', 'error:mssql-constraint-with-check', 'error:mssql-index-offline',
+    'error:mssql-online-unsupported-edition', 'error:rename-column', 'warning:missing-down', 'warning:mssql-constraint-nocheck',
+    'warning:mssql-lock-timeout', 'warning:not-atomic',
+  ]);
+  assert.deepEqual(rulesOf('bad/mssql-efcore').found, [
+    'error:drop-column', 'error:mssql-add-not-null-default', 'warning:missing-down', 'warning:mssql-lock-timeout', 'warning:not-atomic',
+  ]);
+  assert.deepEqual(rulesOf('bad/mssql-dacpac').found, ['error:rebuild-drops-column']);
+  assert.deepEqual(rulesOf('bad/mssql-goose').found, ['warning:unsupported-separator']);
+  assert.deepEqual(rulesOf('bad/oracle').found, [
+    'error:drop-column', 'error:oracle-add-column-default', 'error:oracle-constraint-validate', 'error:oracle-index-not-online',
+    'error:oracle-online-unsupported-edition', 'error:oracle-online-unsupported-edition', 'warning:missing-down',
+    'warning:oracle-ddl-commits-dml', 'warning:oracle-ddl-lock-timeout', 'warning:oracle-drop-column-rewrites',
+  ]);
+  assert.deepEqual(rulesOf('bad/db2').found, [
+    'error:change-column-type', 'error:change-column-type', 'error:db2-constraint-check', 'error:db2-reorg-limit', 'error:db2-reorg-pending',
+    'error:drop-column', 'error:drop-column', 'warning:db2-lock-timeout', 'warning:db2-reorg-offline', 'warning:missing-down', 'warning:not-atomic',
+  ]);
+  assert.deepEqual(rulesOf('bad/oracle-plsql').found, ['error:oracle-missing-slash', 'warning:missing-down', 'warning:oracle-ddl-lock-timeout']);
+  for (const dir of ['bad/postgres', 'bad/sqlite', 'bad/postgres-locks', 'bad/mysql', 'bad/sqlite-rebuild', 'bad/mssql', 'bad/mssql-efcore', 'bad/mssql-dacpac', 'bad/oracle', 'bad/oracle-plsql', 'bad/db2']) assert.equal(rulesOf(dir).code, 1, dir);
 });

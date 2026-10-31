@@ -4,12 +4,17 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+  schedule:
+    # the Db2 rehearsal (large, privileged image, slow start) runs here and on demand, not on every pull request
+    - cron: '17 4 * * 1'
 
 permissions:
   contents: read
 
 jobs:
   test:
+    if: github.event_name != 'schedule'
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -21,10 +26,10 @@ jobs:
       # the Docker rehearsal tests have their own Linux job below
       MSAFE_DOCKER_TESTS: '0'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: ${{ matrix.node }}
       - run: npm test
@@ -38,7 +43,7 @@ jobs:
             "$@" > /dev/null || code=$?
             if [ "$code" -ne 1 ]; then echo "expected exit 1, got $code: $*"; exit 1; fi
           }
-          for d in postgres postgres-locks mysql sqlite sqlite-rebuild; do
+          for d in postgres postgres-locks mysql sqlite sqlite-rebuild mssql mssql-efcore mssql-dacpac oracle db2; do
             expect_exit_1 node skills/migrations-safe/scripts/migration-lint.mjs "skills/migrations-safe/fixtures/bad/$d"
           done
       - name: Rehearse the SQLite fixtures
@@ -51,24 +56,25 @@ jobs:
           if [ "$code" -ne 1 ]; then echo "the lossy rebuild must exit 1, got $code"; exit 1; fi
 
   docker-rehearsal:
-    timeout-minutes: 30
+    if: github.event_name != 'schedule'
+    timeout-minutes: 15
     runs-on: ubuntu-latest
     env:
       MSAFE_REQUIRE_DOCKER: '1'
       # mysql:5.7 ships the metadata-lock instrument disabled; mariadb needs its metadata_lock_info plugin
-      MSAFE_DOCKER_ENGINES: postgres:16,mysql:8.4,mysql:5.7,mariadb:11
+      MSAFE_DOCKER_ENGINES: postgres:16.4,mysql:8.4.2,mysql:5.7.44,mariadb:11.4.3
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '24'
       - name: Pull the engines
         run: |
-          docker pull postgres:16
-          docker pull mysql:8.4
-          docker pull mysql:5.7
-          docker pull mariadb:11
-          docker pull alpine:latest
+          docker pull postgres:16.4
+          docker pull mysql:8.4.2
+          docker pull mysql:5.7.44
+          docker pull mariadb:11.4.3
+          docker pull alpine:3.20.3
       - name: Docker rehearsal tests
         run: node --test test/rehearse-docker.test.mjs
       - name: Rehearse the seeds on PostgreSQL and MySQL
@@ -76,23 +82,102 @@ jobs:
           S=skills/migrations-safe
           printf 'ALTER TABLE orders ADD COLUMN due_on date;\n' > /tmp/pg-add.sql
           printf 'ALTER TABLE orders ADD COLUMN due_on date NULL, ALGORITHM=INSTANT;\n' > /tmp/my-add.sql
-          node $S/scripts/rehearse.mjs --engine postgres:16 $S/fixtures/seed-postgres.sql /tmp/pg-add.sql
-          node $S/scripts/rehearse.mjs --engine mysql:8.4 $S/fixtures/seed-mysql.sql /tmp/my-add.sql
-          node $S/scripts/rehearse.mjs --engine mariadb:11 $S/fixtures/seed-mysql.sql /tmp/my-add.sql
+          node $S/scripts/rehearse.mjs --engine postgres:16.4 $S/fixtures/seed-postgres.sql /tmp/pg-add.sql
+          node $S/scripts/rehearse.mjs --engine mysql:8.4.2 $S/fixtures/seed-mysql.sql /tmp/my-add.sql
+          node $S/scripts/rehearse.mjs --engine mariadb:11.4.3 $S/fixtures/seed-mysql.sql /tmp/my-add.sql
           printf 'ALTER TABLE orders ADD COLUMN due_on date NULL;\n' > /tmp/my57-add.sql
-          node $S/scripts/rehearse.mjs --engine mysql:5.7 $S/fixtures/seed-mysql.sql /tmp/my57-add.sql
+          node $S/scripts/rehearse.mjs --engine mysql:5.7.44 $S/fixtures/seed-mysql.sql /tmp/my57-add.sql
       - name: No rehearsal container is left behind
         if: always()
         run: |
           left=$(docker ps -aq --filter name=msafe-rehearse-)
           if [ -n "$left" ]; then echo "containers left behind:"; docker ps -a --filter name=msafe-rehearse-; exit 1; fi
 
+  docker-mssql:
+    if: github.event_name != 'schedule'
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    env:
+      MSAFE_REQUIRE_DOCKER: '1'
+      # 2022 and 2025: --edition standard runs Express (2022) or Standard Developer (2025), --edition enterprise runs Developer
+      MSAFE_DOCKER_ENGINES: mssql:2022-CU14-ubuntu-22.04,mssql:2025-CU1-ubuntu-22.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24'
+      - name: Pull the engines
+        run: |
+          docker pull mcr.microsoft.com/mssql/server:2022-CU14-ubuntu-22.04
+          docker pull mcr.microsoft.com/mssql/server:2025-CU1-ubuntu-22.04
+      - name: SQL Server rehearsal tests
+        run: node --test test/rehearse-docker.test.mjs
+      - name: Rehearse the seed on SQL Server 2022 Developer
+        run: |
+          S=skills/migrations-safe
+          printf 'ALTER TABLE orders ADD due_on date NULL;\n' > /tmp/ms-add.sql
+          node $S/scripts/rehearse.mjs --engine mssql:2022-CU14-ubuntu-22.04 --edition enterprise $S/fixtures/seed-mssql.sql /tmp/ms-add.sql
+      - name: No rehearsal container or network is left behind
+        if: always()
+        run: |
+          left=$(docker ps -aq --filter label=msafe-rehearse=1)$(docker network ls -q --filter label=msafe-rehearse=1)
+          if [ -n "$left" ]; then echo "left behind:"; docker ps -a --filter label=msafe-rehearse=1; docker network ls --filter label=msafe-rehearse=1; exit 1; fi
+
+  docker-oracle:
+    if: github.event_name != 'schedule'
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    env:
+      MSAFE_REQUIRE_DOCKER: '1'
+      MSAFE_DOCKER_ENGINES: oracle:23.5-slim-faststart
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24'
+      - name: Pull the engine
+        run: docker pull gvenzl/oracle-free:23.5-slim-faststart
+      - name: Oracle rehearsal tests
+        run: node --test test/rehearse-docker.test.mjs
+      - name: No rehearsal container or network is left behind
+        if: always()
+        run: |
+          left=$(docker ps -aq --filter label=msafe-rehearse=1)$(docker network ls -q --filter label=msafe-rehearse=1)
+          if [ -n "$left" ]; then echo "left behind:"; docker ps -a --filter label=msafe-rehearse=1; docker network ls --filter label=msafe-rehearse=1; exit 1; fi
+
+  # A skipped job shows its name, so the name says why it is skipped on pull requests and push, and what covers it:
+  # the Db2 image needs a privileged x86_64 daemon and many minutes to start; the Db2 lint rules run on every OS in
+  # the test job (test/db2.test.mjs, fixtures good/db2 and bad/db2).
+  docker-db2:
+    name: docker-db2 (skipped on pull requests and push - privileged x86_64 daemon, slow start; runs on schedule and workflow_dispatch; Db2 lint rules are covered by the test job on every OS)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    timeout-minutes: 30
+    runs-on: ubuntu-latest
+    env:
+      MSAFE_REQUIRE_DOCKER: '1'
+      MSAFE_DOCKER_ENGINES: db2:11.5.9.0
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24'
+      - name: Pull the engine
+        run: docker pull icr.io/db2_community/db2:11.5.9.0
+      - name: Db2 rehearsal tests
+        run: node --test test/rehearse-docker.test.mjs
+      - name: No rehearsal container or network is left behind
+        if: always()
+        run: |
+          left=$(docker ps -aq --filter label=msafe-rehearse=1)$(docker network ls -q --filter label=msafe-rehearse=1)
+          if [ -n "$left" ]; then echo "left behind:"; docker ps -a --filter label=msafe-rehearse=1; docker network ls --filter label=msafe-rehearse=1; exit 1; fi
+
   validate:
+    if: github.event_name != 'schedule'
     timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '24'
-      - run: npx --yes @anthropic-ai/claude-code plugin validate .
+      - run: npx --yes @anthropic-ai/claude-code@2.1.316 plugin validate .
