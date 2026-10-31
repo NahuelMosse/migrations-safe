@@ -1,0 +1,50 @@
+# The first version is published manually (npm publish from a maintainer's machine), because npm trusted publishing
+# can only be configured on a package that already exists. Every later version is published from here by pushing a tag;
+# a tag whose version is already on npm (the hand-published first one) passes without publishing.
+name: release
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # the Docker rehearsal tests have their own jobs in ci.yml
+      MSAFE_DOCKER_TESTS: '0'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+      - name: Trusted publishing needs npm 11.5.1 or newer
+        run: |
+          npm install --global npm@11.21.1
+          npm --version
+      - name: Tag, package.json and plugin.json versions agree
+        run: |
+          pkg=$(node -p "require('./package.json').version")
+          plugin=$(node -p "require('./.claude-plugin/plugin.json').version")
+          echo "package.json $pkg, plugin.json $plugin"
+          test "$pkg" = "$plugin" || { echo "::error::package.json ($pkg) and plugin.json ($plugin) differ"; exit 1; }
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            test "$GITHUB_REF_NAME" = "v$pkg" || { echo "::error::tag $GITHUB_REF_NAME is not v$pkg"; exit 1; }
+          fi
+      - name: Install dependencies
+        run: |
+          if [ -f package-lock.json ]; then npm ci; else echo "no lockfile, zero dependencies: nothing to install"; fi
+      - run: npm test
+      - name: Publish
+        run: |
+          name=$(node -p "require('./package.json').name")
+          pkg=$(node -p "require('./package.json').version")
+          if [ "$GITHUB_REF_TYPE" != "tag" ]; then npm publish --dry-run
+          elif [ "$(npm view "$name@$pkg" version 2>/dev/null)" = "$pkg" ]; then echo "$name@$pkg is already on npm (the first version is published by hand): nothing to publish"
+          else npm publish; fi
