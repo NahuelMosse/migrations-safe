@@ -9,10 +9,13 @@ file (`-- +goose`, `-- migrate:up`, `__EFMigrationsHistory`, `tmp_ms_xx_`); the 
 Dialect: `--dialect`; a `-- migration-lint: dialect sqlite` line; `migration_lock.toml` (provider `sqlserver`
 too) or the Drizzle config; the migration tool's own configuration (below); the syntax; the other files of the
 project; otherwise PostgreSQL, and then the run prints `dialect assumed to be PostgreSQL` with how to change it.
-The project's files are read in the nearest directory upwards that holds one, most specific first:
-1. The migration tool's configuration, which outranks the syntax (Oracle's `MODIFY col NOT NULL`, Db2's `RENAME
-   TABLE` and `NVARCHAR` look like MySQL or SQL Server; when the syntax suggests another engine the run says so and
-   uses the project's): the jdbc URL in `flyway.conf` / `flyway.toml` / `liquibase.properties`, a Liquibase changelog
+The project's files are read in every directory from the file up to the repository root, and rank comes before
+nearness: the most specific rank found anywhere on the way wins (a compose file in `services/web` does not shadow
+the Flyway config at the root), and the nearest directory only breaks ties within a rank. Hints that name another
+engine are listed in a warning. The ranks, most specific first:
+1. The migration tool's configuration, which outranks the syntax: when the syntax contains a marker the project's
+   engine cannot parse, the run says so and uses the project's engine (Oracle's `MODIFY col NOT NULL` is read as
+   Oracle, not MySQL): the jdbc URL in `flyway.conf` / `flyway.toml` / `liquibase.properties`, a Liquibase changelog
    `dbms`, an SSDT `.sqlproj`; the EF Core / DbUp provider package in a `.csproj`; Spring Boot's
    `application*.properties|yml` (`spring.datasource.url`, `spring.flyway.url`, a jdbc URL, a driver class) in the
    directory, `src/main/resources` or `config`; Flyway's database module in `pom.xml` / `build.gradle(.kts)`
@@ -24,7 +27,13 @@ The project's files are read in the nearest directory upwards that holds one, mo
 3. The `image:` of a compose file (`mcr.microsoft.com/mssql/server`, `gvenzl/oracle-*`,
    `container-registry.oracle.com/database`, `icr.io/db2_community/db2`, `postgres`, `mysql`, `mariadb`).
 
-If a more specific source disagrees with a less specific one the first wins and the run warns, naming the other. If
+A syntax marker only counts against a hint when the hinted engine cannot parse it: each marker lists the engines
+that accept it (`RENAME TABLE` is MySQL and Db2, `NVARCHAR` is SQL Server, Db2, MySQL and SQLite, `EXECUTE IMMEDIATE`
+and `DBMS_*` are Oracle and Db2, `FROM dual` is Oracle and MySQL, `[x]` is SQL Server and SQLite, backticks are MySQL
+and SQLite), so a Db2 compose file keeps Db2 for a file with `RENAME TABLE`, while `GO` or `VARCHAR2` override it.
+Rank 1 is kept even then (with a warning); ranks 2 and 3 give way to the syntax, and the note says which engine
+was used and why. If a more specific source disagrees with a less specific one the first wins and the run warns,
+naming the other. If
 sources of the same rank disagree (a compose file with SQL Server and Oracle) and the SQL has no engine-specific
 syntax, nothing can be chosen: the run exits 2 listing the candidates, and `--dialect` or the directive settles it.
 Syntax markers, strongest first: `--#SET

@@ -189,22 +189,37 @@ const PROVIDERS = { postgresql: 'postgres', postgres: 'postgres', pg: 'postgres'
 };
 
 // Dialect of the project that owns `path`. `declared` ones come from a file whose job is to name the provider
-// (Prisma's migration_lock.toml, a Drizzle config). The rest is inferred from the nearest directory upwards that
-// holds a hint (see dialect-hints.mjs): { dialect, evidence, conflict } or, when the hints disagree among
-// themselves, { dialect: null, ambiguous }.
-export const projectDialect = (path) => {
-  for (const dir of ancestors(startDir(path))) {
-    const lock = read(join(dir, 'migration_lock.toml'));
-    const provider = lock.match(/provider\s*=\s*"([\w]+)"/)?.[1]?.toLowerCase();
-    if (provider && PROVIDERS[provider]) return { dialect: PROVIDERS[provider], evidence: `migration_lock.toml in ${dir}`, declared: true };
-    for (const cfg of ['drizzle.config.ts', 'drizzle.config.js', 'drizzle.config.mjs', 'drizzle.config.cjs', 'drizzle.config.json']) {
-      const m = read(join(dir, cfg)).match(/dialect['"]?\s*[:=]\s*['"]([\w]+)['"]/i);
-      if (m && PROVIDERS[m[1].toLowerCase()]) return { dialect: PROVIDERS[m[1].toLowerCase()], evidence: `${cfg} in ${dir}`, declared: true };
-    }
-    const hinted = hintedDialect(dir);
-    if (hinted) return hinted;
+// (Prisma's migration_lock.toml, a Drizzle config). The rest is inferred from the files of every directory from
+// the file up to the repository root (see dialect-hints.mjs): the most specific rank anywhere on the way wins and
+// nearness only breaks ties within a rank, so a compose file in services/web does not shadow the Flyway config at
+// the root. Returns { dialect, evidence, conflict } or, when the hints of the winning directory disagree among
+// themselves, { dialect: null, ambiguous }. `conflict` lists the hints of the walk that name another engine.
+const declaredIn = (dir) => {
+  const lock = read(join(dir, 'migration_lock.toml'));
+  const provider = lock.match(/provider\s*=\s*"([\w]+)"/)?.[1]?.toLowerCase();
+  if (provider && PROVIDERS[provider]) return { dialect: PROVIDERS[provider], evidence: `migration_lock.toml in ${dir}`, declared: true };
+  for (const cfg of ['drizzle.config.ts', 'drizzle.config.js', 'drizzle.config.mjs', 'drizzle.config.cjs', 'drizzle.config.json']) {
+    const m = read(join(dir, cfg)).match(/dialect['"]?\s*[:=]\s*['"]([\w]+)['"]/i);
+    if (m && PROVIDERS[m[1].toLowerCase()]) return { dialect: PROVIDERS[m[1].toLowerCase()], evidence: `${cfg} in ${dir}`, declared: true };
   }
   return null;
+};
+
+export const projectDialect = (path) => {
+  const found = [];
+  for (const dir of ancestors(startDir(path))) {
+    const declared = declaredIn(dir);
+    if (declared) { found.push({ ...declared, tier: 0 }); continue; }
+    const hinted = hintedDialect(dir);
+    if (hinted) found.push(hinted);
+  }
+  if (!found.length) return null;
+  const best = found.reduce((a, b) => (b.tier < a.tier ? b : a));
+  if (best.declared) return best;
+  const elsewhere = found.filter((f) => f !== best).flatMap((f) => f.hints)
+    .filter((h) => h.dialect !== best.dialect).map((h) => `${h.dialect} from ${h.from} in ${h.dir}`);
+  const conflict = [...new Set([...(best.conflict ?? []), ...elsewhere])];
+  return { ...best, conflict: conflict.length ? conflict : null };
 };
 
 // Dialect from the syntax of a file; comments are ignored (Prisma writes backticks in its warnings).
@@ -212,22 +227,56 @@ export const projectDialect = (path) => {
 // identifier (PostgreSQL has `int[]` and `a[1]`), and GENERATED ... IDENTITY says nothing about Db2.
 export const sniffDialect = (sql) => sniffMarkers(sql) ?? 'postgres';
 
-// Same, but null when the syntax carries no marker of any engine (plain SQL that every engine accepts).
-export const sniffMarkers = (sql) => {
-  if (/^\s*--#\s*SET\s+TERMINATOR\b/im.test(sql)) return 'db2';
+// What each marker of the syntax proves. A marker lists the engines that can parse it, first the one it is most
+// typical of: the first marker that matches decides the engine when nothing else is known, and a file's
+// compatible engines are those every marker accepts (RENAME TABLE is MySQL and Db2, NVARCHAR is SQL Server, Db2,
+// MySQL and SQLite, EXECUTE IMMEDIATE and DBMS_* are Oracle and Db2). Markers must be ones PostgreSQL does not use:
+// `[x]` must be an identifier (PostgreSQL has `int[]` and `a[1]`), and GENERATED ... IDENTITY says nothing.
+const PLSQL_PRAGMA = /\bpragma\s+(?:exception_init|autonomous_transaction|serially_reusable|restrict_references|udf)\b/i;
+const MARKERS = [
+  // [where to look, pattern, engines]; `sql` is the raw text, `code` has no comments, `bare` no string literals either
+  ['sql', /^\s*--#\s*SET\s+TERMINATOR\b/im, ['db2']],
+  ['pragma', /\bpragma\b/i, ['sqlite']],
+  ['code', /\bautoincrement\b|\bwithout rowid\b/i, ['sqlite']],
+  ['bare', /\badmin_cmd\b|\bsysproc\.|\bsysibm\.|\bwlm_set_client_info\b|\bcurrent\s+lock\s+timeout\b|\bset\s+integrity\b|\breorg\s+table\b/i, ['db2']],
+  ['bare', /^\s*go(?:\s+\d+)?\s*$/im, ['mssql']],
+  ['bare', /(?:^|[\s.(,])\[[A-Za-z_][\w ]*\](?=[\s.,;)=]|$)/, ['mssql', 'sqlite']],
+  ['bare', /\bsp_rename\b|\bidentity\s*\(\s*\d|\bgetdate\s*\(|\bset\s+nocount\b|\bwith\s*\(\s*online\s*=/i, ['mssql']],
+  ['bare', /\bnvarchar\b/i, ['mssql', 'db2', 'mysql', 'sqlite']],
+  ['bare', /^\s*\/\s*$/m, ['oracle']],
+  ['bare', /\bvarchar2\b|\bnvarchar2\b|\bddl_lock_timeout\b|\bset\s+unused\b|\benable\s+novalidate\b|\bmodify\s*\(/i, ['oracle']],
+  ['bare', PLSQL_PRAGMA, ['oracle']],
+  // MODIFY col NOT NULL / DEFAULT ...: MySQL's MODIFY always restates the type
+  ['bare', /\bmodify\s+(?:\w+|"[^"]+")\s+(?:not\s+null|null|default|constraint|encrypt|decrypt|invisible|visible)\b/i, ['oracle']],
+  ['bare', /\bexecute\s+immediate\b|\bdbms_\w+/i, ['oracle', 'db2']],
+  ['bare', /\bfrom\s+dual\b/i, ['oracle', 'mysql']],
+  ['bare', /\bnumber\s*\(\s*\d/i, ['oracle', 'db2', 'sqlite']],
+  ['code', /\bengine\s*=|\bauto_increment\b|\bunsigned\b/i, ['mysql']],
+  ['code', /\bmodify\s+(?:column\s+)?[\w`]/i, ['mysql', 'oracle']],
+  ['code', /\brename\s+table\b/i, ['mysql', 'db2']],
+  ['code', /`\w+`/, ['mysql', 'sqlite']],
+];
+
+// The markers of `sql` that match, in order, each as the list of engines that accept it.
+const matchedMarkers = (sql) => {
   const code = sql.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/--[^\n]*/g, ' ');
   const bare = code.replace(/'(?:[^']|'')*'/g, "''");
   // PL/SQL has its own pragmas (EXCEPTION_INIT, AUTONOMOUS_TRANSACTION): they are Oracle, not SQLite
-  const plsqlPragma = /\bpragma\s+(?:exception_init|autonomous_transaction|serially_reusable|restrict_references|udf)\b/i;
-  if (/\bpragma\b|\bautoincrement\b|\bwithout rowid\b/i.test(code.replace(new RegExp(plsqlPragma, 'gi'), ' '))) return 'sqlite';
-  if (/\badmin_cmd\b|\bsysproc\.|\bsysibm\.|\bwlm_set_client_info\b|\bcurrent\s+lock\s+timeout\b|\bset\s+integrity\b|\breorg\s+table\b/i.test(bare)) return 'db2';
-  if (/^\s*go(?:\s+\d+)?\s*$/im.test(bare) || /(?:^|[\s.(,])\[[A-Za-z_][\w ]*\](?=[\s.,;)=]|$)/.test(bare)
-    || /\bsp_rename\b|\bnvarchar\b|\bidentity\s*\(\s*\d|\bgetdate\s*\(|\bset\s+nocount\b|\bwith\s*\(\s*online\s*=/i.test(bare)) return 'mssql';
-  if (/^\s*\/\s*$/m.test(bare) || /\bvarchar2\b|\bnvarchar2\b|\bexecute\s+immediate\b|\bfrom\s+dual\b|\bddl_lock_timeout\b|\bdbms_\w+|\bset\s+unused\b|\benable\s+novalidate\b|\bnumber\s*\(\s*\d|\bmodify\s*\(/i.test(bare) || plsqlPragma.test(bare)
-    // MODIFY col NOT NULL / DEFAULT ...: MySQL's MODIFY always restates the type
-    || /\bmodify\s+(?:\w+|"[^"]+")\s+(?:not\s+null|null|default|constraint|encrypt|decrypt|invisible|visible)\b/i.test(bare)) return 'oracle';
-  if (/\bengine\s*=|\bauto_increment\b|\bunsigned\b|\bmodify\s+(?:column\s+)?[\w`]|\brename\s+table\b|`\w+`/i.test(code)) return 'mysql';
-  return null;
+  const pragma = code.replace(new RegExp(PLSQL_PRAGMA, 'gi'), ' ');
+  const text = { sql, code, bare, pragma };
+  return MARKERS.filter(([where, re]) => re.test(text[where])).map(([, , engines]) => engines);
+};
+
+// The engine the syntax points to, or null when it carries no marker of any engine (plain SQL that every engine
+// accepts).
+export const sniffMarkers = (sql) => matchedMarkers(sql)[0]?.[0] ?? null;
+
+// The engines that can parse every marker in `sql`: null without markers (all of them), an empty set when the
+// markers contradict each other.
+export const compatibleEngines = (sql) => {
+  const matched = matchedMarkers(sql);
+  if (!matched.length) return null;
+  return new Set(matched.reduce((acc, engines) => acc.filter((e) => engines.includes(e)), matched[0]));
 };
 
 export const fileDialectDirective = (sql) => sql.match(/^\s*--\s*migration-lint:\s*dialect\s+(\w+)/im)?.[1]?.toLowerCase();
@@ -247,15 +296,18 @@ export const decideDialect = (sql, { dialect, project } = {}) => {
   if (DIALECTS.includes(directive)) return { dialect: directive, source: 'directive' };
   if (project?.declared) return { dialect: project.dialect, source: 'declared', evidence: project.evidence };
   const marked = sniffMarkers(sql);
+  const compatible = compatibleEngines(sql);
   const named = project?.dialect ?? null;
-  // the migration tool's own configuration outranks what the SQL looks like (Oracle's MODIFY looks like MySQL's,
-  // Db2's RENAME TABLE and NVARCHAR look like MySQL and SQL Server): when they disagree the run says so
-  if (named && project.strong) {
-    const disagrees = marked && marked !== named ? { syntax: marked } : {};
-    return { dialect: named, source: 'inferred', evidence: project.evidence, conflict: project.conflict, ...disagrees };
+  if (named) {
+    // A marker only counts against the project when the engine the project names cannot parse it: RENAME TABLE is
+    // valid Db2, so a Db2 project keeps its engine. The migration tool's own configuration (a strong hint) is
+    // trusted even then, and the run says the syntax disagreed; a weaker hint (compose, a driver) gives way.
+    const excluded = Boolean(compatible) && !compatible.has(named);
+    if (!excluded) return { dialect: named, source: 'inferred', evidence: project.evidence, conflict: project.conflict };
+    if (project.strong) return { dialect: named, source: 'inferred', evidence: project.evidence, conflict: project.conflict, syntax: marked };
+    return { dialect: marked, source: 'syntax', project: named, evidence: project.evidence };
   }
-  if (marked) return { dialect: marked, source: 'syntax', ...(named && named !== marked ? { project: named, evidence: project.evidence } : {}) };
-  if (named) return { dialect: named, source: 'inferred', evidence: project.evidence, conflict: project.conflict };
+  if (marked) return { dialect: marked, source: 'syntax' };
   if (project?.ambiguous) return { dialect: null, source: 'ambiguous', ambiguous: project.ambiguous };
   return { dialect: 'postgres', source: 'assumed' };
 };

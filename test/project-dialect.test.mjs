@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { hintedDialect } from '../skills/migrations-safe/scripts/lib/dialect-hints.mjs';
-import { decideDialect, projectDialect, sniffDialect } from '../skills/migrations-safe/scripts/lib/runners.mjs';
+import { compatibleEngines, decideDialect, projectDialect, sniffDialect } from '../skills/migrations-safe/scripts/lib/runners.mjs';
 import { lintCli, put, scratch } from './helpers.mjs';
 
 // Marker-free SQL: every engine accepts it, so only the project can say which rules apply.
@@ -157,9 +157,12 @@ test('the migration tool configuration outranks what the syntax looks like, and 
   const pragma = probe(oracleConf, "DECLARE\n  e EXCEPTION;\n  PRAGMA EXCEPTION_INIT(e, -1430);\nBEGIN\n  EXECUTE IMMEDIATE 'ALTER TABLE orders ADD (c NUMBER)';\nEXCEPTION WHEN e THEN NULL;\nEND;\n/\n", 'oracle-ddl-lock-timeout');
   assert.ok(!pragma.rules.includes('transaction-conflict'), pragma.rules.join());
   const rename = probe(db2Conf, 'ALTER TABLE orders DROP COLUMN note;\nRENAME TABLE orders TO orders_old;\n', 'db2-reorg-pending');
-  assert.match(rename.notes.join('\n'), /the syntax suggested MySQL but the project says Db2 \(flyway\.conf in .*\): using Db2/);
+  assert.ok(!rename.notes.some((n) => /syntax suggested/.test(n)), 'RENAME TABLE is valid Db2: no disagreement');
   const nvarchar = probe(db2Conf, 'ALTER TABLE orders ADD COLUMN note NVARCHAR(10);\nALTER TABLE orders DROP COLUMN old;\n', 'db2-reorg-pending');
-  assert.match(nvarchar.notes.join('\n'), /the syntax suggested SQL Server but the project says Db2/);
+  assert.ok(!nvarchar.notes.some((n) => /syntax suggested/.test(n)), 'NVARCHAR is valid Db2: no disagreement');
+  // a marker the project's engine cannot parse is a disagreement, and the tool configuration still wins
+  const bracket = probe(db2Conf, 'ALTER TABLE [orders] DROP COLUMN note;\n', 'db2-reorg-pending');
+  assert.match(bracket.notes.join('\n'), /the syntax suggested SQL Server but the project says Db2 \(flyway\.conf in .*\): using Db2/);
   // explicit choices stay on top of the project
   const dir = scratch(t);
   put(dir, ...db2Conf);
@@ -236,4 +239,106 @@ test('the nearest directory with a hint decides, and Prisma\'s declared provider
   put(prisma, 'prisma/migrations/migration_lock.toml', 'provider = "sqlserver"\n');
   const info = projectDialect(join(prisma, 'prisma', 'migrations', '0001_x', 'migration.sql'));
   assert.deepEqual([info.dialect, info.declared], ['mssql', true]);
+});
+
+test('a weak hint stays when the engine it names can parse the syntax (Db2 compose, RENAME TABLE) and the note names the engine used', (t) => {
+  const dir = scratch(t);
+  put(dir, 'docker-compose.yml', 'services:\n  db:\n    image: icr.io/db2_community/db2:11.5.9.0\n');
+  put(dir, 'V1__x.sql', 'RENAME TABLE orders TO orders_old;\nALTER TABLE orders_old DROP COLUMN note;\n');
+  const r = lintJson(dir);
+  assert.ok(r.rules.includes('db2-reorg-pending'), r.rules.join());
+  assert.ok(!r.rules.some((id) => id.startsWith('mysql-')), r.rules.join());
+  assert.ok(noteMatching(r.notes, /dialect Db2 inferred from docker-compose\.yml/), r.notes.join('\n'));
+  assert.ok(!r.notes.some((n) => /syntax sugg/.test(n)));
+});
+
+test('a weak hint gives way to syntax its engine cannot parse, and the note says which engine was used and why', (t) => {
+  const dir = scratch(t);
+  put(dir, 'docker-compose.yml', 'services:\n  db:\n    image: icr.io/db2_community/db2:11.5.9.0\n');
+  put(dir, 'V1__x.sql', 'CREATE TABLE orders_new (id int) ENGINE=InnoDB;\n');
+  const r = lintJson(dir);
+  assert.ok(r.notes.some((n) => /MySQL rules assume/.test(n)), r.notes.join('\n'));
+  const note = noteMatching(r.notes, /the syntax suggests MySQL but the project files say Db2/);
+  assert.ok(note, r.notes.join('\n'));
+  assert.match(note, /docker-compose\.yml/);
+  assert.match(note, /using MySQL/);
+  assert.ok(!r.notes.some((n) => /dialect Db2 inferred/.test(n)), 'no note claims an engine that was not used');
+});
+
+test('each marker lists the engines that can parse it: shared markers keep the hinted engine, exclusive ones override it', () => {
+  const engines = (sql) => { const c = compatibleEngines(sql); return c && [...c].sort().join(); };
+  // shared markers
+  assert.equal(engines('RENAME TABLE a TO b;'), 'db2,mysql');
+  assert.equal(engines('ALTER TABLE t ADD c NVARCHAR(10);'), 'db2,mssql,mysql,sqlite');
+  assert.equal(engines("BEGIN EXECUTE IMMEDIATE 'x'; END;"), 'db2,oracle');
+  assert.equal(engines('CALL DBMS_OUTPUT.PUT_LINE(1);'), 'db2,oracle');
+  assert.equal(engines('SELECT 1 FROM dual;'), 'mysql,oracle');
+  assert.equal(engines('ALTER TABLE t MODIFY c VARCHAR(20);'), 'mysql,oracle');
+  assert.equal(engines('ALTER TABLE [t] ADD [c] int;'), 'mssql,sqlite');
+  assert.equal(engines('CREATE TABLE `t` (id int);'), 'mysql,sqlite');
+  assert.equal(engines('ALTER TABLE t ADD c NUMBER(10);'), 'db2,oracle,sqlite');
+  // exclusive markers
+  assert.equal(engines('--#SET TERMINATOR @\nSELECT 1@'), 'db2');
+  assert.equal(engines("CALL SYSPROC.ADMIN_CMD('REORG TABLE t');"), 'db2');
+  assert.equal(engines('SELECT 1;\nGO\n'), 'mssql');
+  assert.equal(engines("EXEC sp_rename 'a', 'b';"), 'mssql');
+  assert.equal(engines('ALTER TABLE t ADD c VARCHAR2(10);'), 'oracle');
+  assert.equal(engines('ALTER TABLE t MODIFY c NOT NULL;'), 'oracle');
+  assert.equal(engines('CREATE TABLE t (id int AUTO_INCREMENT) ENGINE=InnoDB;'), 'mysql');
+  assert.equal(engines('PRAGMA foreign_keys = ON;'), 'sqlite');
+  // markers that contradict each other leave nothing
+  assert.equal(engines('CREATE TABLE `t` (c VARCHAR2(10));'), '');
+  assert.equal(compatibleEngines('ALTER TABLE t ADD c int;'), null);
+  const named = (dialect, sql, strong = false) => decideDialect(sql, { project: { dialect, strong, evidence: 'x in y' } });
+  for (const [engine, sql] of [['db2', 'RENAME TABLE a TO b;'], ['db2', 'ALTER TABLE t ADD c NVARCHAR(5);'], ['mysql', 'ALTER TABLE t ADD c NVARCHAR(5);'],
+    ['oracle', 'CALL DBMS_LOCK.SLEEP(1);'], ['db2', "BEGIN EXECUTE IMMEDIATE 'x'; END;"], ['mysql', 'SELECT 1 FROM dual;'], ['oracle', 'ALTER TABLE t MODIFY c VARCHAR(5);'],
+    ['mssql', 'CREATE TABLE [t] (id int);'], ['sqlite', 'CREATE TABLE `t` (id int);'], ['mysql', 'CREATE TABLE `t` (id int);']]) {
+    assert.deepEqual([named(engine, sql).dialect, named(engine, sql).source], [engine, 'inferred'], `${engine}: ${sql}`);
+  }
+  for (const [engine, sql, used] of [['db2', 'ALTER TABLE t ADD c VARCHAR2(5);', 'oracle'], ['oracle', 'SELECT 1;\nGO\n', 'mssql'], ['mssql', 'CREATE TABLE t (id int) ENGINE=InnoDB;', 'mysql'],
+    ['postgres', 'ALTER TABLE t ADD [c] int;', 'mssql'], ['mysql', "EXEC sp_rename 'a', 'b';", 'mssql']]) {
+    assert.deepEqual([named(engine, sql).dialect, named(engine, sql).source], [used, 'syntax'], `${engine}: ${sql}`);
+  }
+  // the migration tool's own configuration is kept even against a marker its engine cannot parse
+  const strong = named('db2', 'ALTER TABLE t ADD c VARCHAR2(5);', true);
+  assert.deepEqual([strong.dialect, strong.syntax], ['db2', 'oracle']);
+});
+
+test('a connection string that is not a database one, or names no database, is no evidence of PostgreSQL', (t) => {
+  const dir = scratch(t);
+  put(dir, 'App.csproj', '<Project><ItemGroup><PackageReference Include="Microsoft.Data.SqlClient" Version="5.2.0" /></ItemGroup></Project>');
+  put(dir, 'appsettings.json', '{"ConnectionStrings":{"Db":"Server=tcp:db,1433;Database=shop;User Id=sa","Bus":"host=rabbit;port=5672;username=guest;password=guest"}}');
+  const info = hintedDialect(dir);
+  assert.equal(info.dialect, 'mssql');
+  assert.equal(info.ambiguous, undefined);
+  assert.equal(info.conflict, null);
+  const only = scratch(t);
+  put(only, 'appsettings.json', '{"ConnectionStrings":{"Bus":"host=rabbit;port=5672;username=guest","Cache":"redis:6379","Note":"Host=somewhere"}}');
+  assert.equal(hintedDialect(only), null);
+  const pg = (cs) => { const d = scratch(t); put(d, 'appsettings.json', JSON.stringify({ ConnectionStrings: { Db: cs } })); return hintedDialect(d)?.dialect; };
+  assert.equal(pg('Host=localhost;Database=shop;Username=app;Password=x'), 'postgres');
+  assert.equal(pg('Server=localhost;Port=5432;Database=shop;User Id=app'), 'postgres');
+  assert.equal(pg('Host=localhost;Username=app;Password=x'), undefined, 'a host and a user name are not enough');
+});
+
+test('rank first, nearness second: a tool-config hint up the tree outranks a nearer weak one', (t) => {
+  const root = scratch(t);
+  put(root, '.git/HEAD', 'ref: refs/heads/main\n');
+  put(root, 'flyway.conf', 'flyway.url=jdbc:oracle:thin:@//h:1521/XEPDB1\n');
+  put(root, 'services/web/docker-compose.yml', 'services:\n  cache:\n    image: postgres:16\n');
+  put(root, 'services/web/db/V1__index.sql', ORACLE_SQL);
+  const file = join(root, 'services', 'web', 'db', 'V1__index.sql');
+  const info = projectDialect(file);
+  assert.deepEqual([info.dialect, info.strong], ['oracle', true]);
+  assert.match(info.conflict.join(), /postgres from docker-compose\.yml in .*web/);
+  const r = lintJson(join(root, 'services', 'web', 'db'));
+  assert.ok(r.rules.includes('oracle-index-not-online'), r.rules.join());
+  assert.match(noteMatching(r.notes, /other project files point to another engine/), /postgres from docker-compose\.yml in/);
+  // within one rank the nearest directory still decides
+  const near = scratch(t);
+  put(near, '.git/HEAD', 'ref\n');
+  put(near, 'flyway.conf', 'flyway.url=jdbc:sqlserver://h\n');
+  put(near, 'svc/flyway.conf', 'flyway.url=jdbc:oracle:thin:@//h:1521/X\n');
+  put(near, 'svc/db/V1__x.sql', ORACLE_SQL);
+  assert.equal(projectDialect(join(near, 'svc', 'db', 'V1__x.sql')).dialect, 'oracle');
 });

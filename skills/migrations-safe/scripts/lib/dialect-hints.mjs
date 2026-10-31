@@ -71,11 +71,14 @@ const withoutTestDependencies = (file, text) => (file === 'pom.xml'
   : text.split(/\r?\n/).filter((l) => !/^\s*test\w*\s*[(\s'"]|testcontainers/i.test(l)).join('\n'));
 
 // A .NET connection string says which engine through the keys it uses.
+// Strings that are not a connection string at all (a RabbitMQ URL, a message) are ignored, and PostgreSQL is only
+// read from a string that names a database or its port: `host=rabbit;port=5672;username=guest` is not evidence.
 const connectionDialect = (cs) => {
+  if (cs.split(';').filter((p) => /^\s*[\w .]+=/.test(p)).length < 2) return null;
   if (/\(\s*DESCRIPTION\s*=|Data Source\s*=[^;]*(?::1521\b|\/\/)|Data Source\s*=\s*[\w.-]+\/\w+\s*(?:;|$)/i.test(cs)) return 'oracle';
   if (/\bDB2\b|Server\s*=[^;]*:50000\b/i.test(cs)) return 'db2';
-  if (/\bHost\s*=|\bPort\s*=\s*5432\b/i.test(cs)) return 'postgres';
-  if (/\bUid\s*=|\bPort\s*=\s*3306\b|\bSslMode\s*=/i.test(cs)) return 'mysql';
+  if (/\bPort\s*=\s*5432\b/i.test(cs) || (/\bHost\s*=/i.test(cs) && /\bDatabase\s*=/i.test(cs))) return 'postgres';
+  if (/\bUid\s*=|\bPort\s*=\s*3306\b/i.test(cs)) return 'mysql';
   if (/Initial Catalog|TrustServerCertificate|Trusted_Connection|Integrated Security|Server\s*=[^;]*;\s*Database\s*=|Data Source\s*=[^;]*(?:\\SQLEXPRESS|\(localdb\)|,1433\b)/i.test(cs)) return 'mssql';
   return null;
 };
@@ -147,7 +150,8 @@ export const hintedDialect = (dir) => {
   const topTier = Math.min(...hints.map((h) => h.tier));
   const top = hints.filter((h) => h.tier === topTier);
   const engines = [...new Set(top.map((h) => h.dialect))];
-  if (engines.length > 1) return { dialect: null, evidence: null, ambiguous: uniq(hints), strong: topTier === TIER_TOOL, dir };
+  const all = hints.map((h) => ({ ...h, dir }));
+  if (engines.length > 1) return { dialect: null, evidence: null, ambiguous: uniq(hints), strong: topTier === TIER_TOOL, tier: topTier, hints: all, dir };
   const others = hints.filter((h) => h.dialect !== engines[0]);
-  return { dialect: engines[0], evidence: `${top[0].from} in ${dir}`, conflict: others.length ? uniq(others) : null, strong: topTier === TIER_TOOL, dir };
+  return { dialect: engines[0], evidence: `${top[0].from} in ${dir}`, conflict: others.length ? uniq(others) : null, strong: topTier === TIER_TOOL, tier: topTier, hints: all, dir };
 };
