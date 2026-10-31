@@ -29,6 +29,9 @@ SQL Server, Oracle and Db2 LUW at the depth MySQL got in 1.1.
   `gvenzl/oracle-free` and says SE2 is not emulated; Db2 also fails a migration that leaves a table
   REORG-pending. Each engine proves its lock measurement with a self-test before the first migration. Engines
   live in `scripts/lib/engines/`, each with its own password and database.
+- Containers and networks carry a `msafe-owner` label (hostname, platform, WSL distro); the sweep of runs that
+  were killed removes only its own system's, so two systems sharing one Docker daemon do not remove each
+  other's live containers.
 - CI jobs `docker-mssql` and `docker-oracle` run on every pull request; `docker-db2` runs on a schedule and on
   demand. `references/mssql.md`, `oracle.md` and `db2.md` give each claim with its version and source.
 

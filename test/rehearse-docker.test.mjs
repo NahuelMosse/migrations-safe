@@ -4,7 +4,7 @@ import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { gzipSync } from 'node:zlib';
-import { SIGNAL_EXIT, locksIn, makeEngine, mysqlInput, parseDuration, parseEngine, seedBytes } from '../skills/migrations-safe/scripts/lib/rehearse-docker.mjs';
+import { OWNER, SIGNAL_EXIT, locksIn, makeEngine, mysqlInput, parseDuration, parseEngine, seedBytes } from '../skills/migrations-safe/scripts/lib/rehearse-docker.mjs';
 import { FIXTURES, REHEARSE_ANY, put, scratch } from './helpers.mjs';
 
 // ── unit tests: no docker needed ─────────────────────────────────────────────────────────────────
@@ -124,6 +124,13 @@ test('locks of one table are merged across modes, and only tables that existed a
   assert.deepEqual(held[0].modes, ['AccessExclusiveLock', 'ShareLock']);
   assert.equal(held[0].polls, 3);
   assert.equal(held[0].ms, 100 + 50);
+});
+
+test('the owner of a container names the system: hostname, platform and, under WSL, the distro', () => {
+  const parts = OWNER.split('/');
+  assert.ok(parts.length >= 2);
+  assert.equal(parts[1], process.platform);
+  assert.equal(parts[2], process.env.WSL_DISTRO_NAME);
 });
 
 test('signal exit codes follow the shell convention', () => {
@@ -542,13 +549,14 @@ if (pgEngine) {
     assert.ok(!/no write lock over/.test(r.out) && !/no write-blocking lock seen/.test(r.out), r.out);
   });
 
-  test(`${pgEngine}: containers left by killed runs are removed at the next start, live ones are not`, { skip, timeout: 600000 }, (t) => {
+  test(`${pgEngine}: containers left by killed runs on this system are removed at the next start, live ones and other systems' are not`, { skip, timeout: 600000 }, (t) => {
     const finished = spawnSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))'], { encoding: 'utf8' });
     const deadPid = Number(finished.stdout);
-    const abandoned = `msafe-rehearse-${deadPid}-aaaaaa`;
-    const running = `msafe-rehearse-${process.pid}-bbbbbb`;
-    for (const n of [abandoned, running]) {
-      const r = spawnSync('docker', ['run', '-d', '--label', 'msafe-rehearse=1', '--name', n, '--network', 'none', 'alpine:latest', 'sleep', '600'], { encoding: 'utf8', windowsHide: true });
+    const abandoned = { name: `msafe-rehearse-${deadPid}-aaaaaa`, owner: OWNER };
+    const running = { name: `msafe-rehearse-${process.pid}-bbbbbb`, owner: OWNER };
+    const elsewhere = { name: `msafe-rehearse-${deadPid}-cccccc`, owner: `${OWNER}/another-system` };
+    for (const { name: n, owner } of [abandoned, running, elsewhere]) {
+      const r = spawnSync('docker', ['run', '-d', '--label', 'msafe-rehearse=1', '--label', `msafe-owner=${owner}`, '--name', n, '--network', 'none', 'alpine:latest', 'sleep', '600'], { encoding: 'utf8', windowsHide: true });
       assert.equal(r.status, 0, r.stderr);
       t.after(() => remove(n));
     }
@@ -556,8 +564,9 @@ if (pgEngine) {
     const r = cli(['--engine', 'postgres:msafe-no-such-tag-0000', PG_SEED, up]);
     assert.equal(r.code, 2, r.out + r.err);
     assert.match(r.out, /removed 1 rehearsal container\(s\) left behind by runs that were killed/);
-    assert.ok(!exists(abandoned), 'the abandoned container is removed');
-    assert.ok(exists(running), 'a container whose process is alive is left alone');
+    assert.ok(!exists(abandoned.name), 'the abandoned container is removed');
+    assert.ok(exists(running.name), 'a container whose process is alive is left alone');
+    assert.ok(exists(elsewhere.name), 'a container started from another system sharing the daemon is left alone');
   });
 }
 

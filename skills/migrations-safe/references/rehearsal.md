@@ -67,8 +67,10 @@ Needs only the `docker` CLI: the database is reached with `docker exec <containe
 published, and nothing but the standard images is used. The container is named `msafe-rehearse-<pid>-<id>`,
 started fresh with no network, and removed at the end, also when a migration fails, the run errors, or it gets
 Ctrl+C or SIGTERM (exit 130 and 143). A hard kill (TerminateProcess, `Stop-Process`, a CI cancel, an IDE stop)
-cannot be caught and leaves the container; every start removes `msafe-rehearse-*` containers whose process is
-gone. `--keep` leaves it running after a run that finished and prints `docker exec` and `docker rm -f -v` lines.
+cannot be caught and leaves the container; every start removes the `msafe-rehearse-*` containers (and private
+networks) started on the same system whose process is gone. The system is the label `msafe-owner`
+(`<hostname>/<platform>/<WSL distro>`): Windows and a WSL distro that share one Docker daemon never remove each
+other's live containers. `--keep` leaves it running after a run that finished and prints `docker exec` and `docker rm -f -v` lines.
 Exit 2: docker is not installed, its daemon does not answer, the image cannot be pulled, the seed does not
 load, bad arguments. An image that is not present is pulled first; it is left in the local cache.
 

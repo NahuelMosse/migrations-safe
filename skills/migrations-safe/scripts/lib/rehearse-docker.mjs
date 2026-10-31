@@ -5,6 +5,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { closeSync, createReadStream, existsSync, openSync, readSync, readFileSync, statSync } from 'node:fs';
+import { hostname } from 'node:os';
 import { createGunzip, gunzipSync } from 'node:zlib';
 import { decodeSql, parse } from './parse.mjs';
 import { RUNNER_IDS, detectRunner, profileOf, wrapsFile } from './runners.mjs';
@@ -49,23 +50,27 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // Containers of this tool are named msafe-rehearse-<pid>-<id>. A run that is killed without a chance to clean
 // up (TerminateProcess, a CI cancel) leaves its container; the next run removes the ones whose pid is gone.
+// A pid only means something on the system that started the run, and one docker daemon can serve several
+// (Windows and its WSL distros share Docker Desktop and the hostname): each container and network is labelled
+// with its owner, and a run sweeps only its own system's.
+export const OWNER = [hostname(), process.platform, process.env.WSL_DISTRO_NAME].filter(Boolean).join('/');
 const pidAlive = (pid) => {
   try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; }
 };
 const sweepAbandoned = async (print) => {
-  const listed = await docker(['ps', '-a', '--filter', 'label=msafe-rehearse=1', '--format', '{{.Names}}'], { timeoutMs: 60000 });
+  const listed = await docker(['ps', '-a', '--filter', 'label=msafe-rehearse=1', '--format', '{{.Names}}\t{{.Label "msafe-owner"}}'], { timeoutMs: 60000 });
   if (listed.code !== 0) return;
-  const dead = listed.out.split(/\r?\n/).map((n) => n.trim()).filter((n) => {
+  const dead = listed.out.split(/\r?\n/).map((l) => l.trim().split('\t')).filter(([n, owner]) => {
     const pid = Number(n.match(/^msafe-rehearse-(\d+)-/)?.[1]);
-    return pid && pid !== process.pid && !pidAlive(pid);
-  });
+    return owner === OWNER && pid && pid !== process.pid && !pidAlive(pid);
+  }).map(([n]) => n);
   for (const n of dead) await docker(['rm', '-f', '-v', n], { timeoutMs: 120000 });
   if (dead.length) print(`removed ${dead.length} rehearsal container(s) left behind by runs that were killed`);
   // the internal networks of engines that need an interface (Oracle) are named like their container
-  const nets = await docker(['network', 'ls', '--filter', 'label=msafe-rehearse=1', '--format', '{{.Name}}'], { timeoutMs: 60000 });
-  for (const n of nets.code === 0 ? nets.out.split(/\r?\n/).map((x) => x.trim()) : []) {
+  const nets = await docker(['network', 'ls', '--filter', 'label=msafe-rehearse=1', '--format', '{{.Name}}\t{{.Label "msafe-owner"}}'], { timeoutMs: 60000 });
+  for (const [n, owner] of nets.code === 0 ? nets.out.split(/\r?\n/).map((l) => l.trim().split('\t')) : []) {
     const pid = Number(n.match(/^msafe-rehearse-(\d+)-/)?.[1]);
-    if (pid && pid !== process.pid && !pidAlive(pid)) await docker(['network', 'rm', n], { timeoutMs: 60000 });
+    if (owner === OWNER && pid && pid !== process.pid && !pidAlive(pid)) await docker(['network', 'rm', n], { timeoutMs: 60000 });
   }
 };
 
@@ -289,11 +294,11 @@ export const rehearseDocker = async (opts, print) => {
     // Oracle's instance fails (ORA-00600 ksipc) without a non-loopback interface: it gets a private network with no
     // outside access that nothing else is attached to, which keeps the data as unreachable as --network none does.
     if (eng.needsNetwork) {
-      const net = await docker(['network', 'create', '--internal', '--label', 'msafe-rehearse=1', name], { timeoutMs: 60000 });
+      const net = await docker(['network', 'create', '--internal', '--label', 'msafe-rehearse=1', '--label', `msafe-owner=${OWNER}`, name], { timeoutMs: 60000 });
       if (net.code !== 0) throw new RehearsalUsageError(`could not create the private network for ${spec.image}: ${firstLines(net.err, 2)}`);
       liveNets.add(name);
     }
-    const started = await docker(['run', '-d', '--name', name, '--label', 'msafe-rehearse=1', '--network', eng.needsNetwork ? name : 'none', ...eng.runArgs({ tmpfs })], { timeoutMs: 120000 });
+    const started = await docker(['run', '-d', '--name', name, '--label', 'msafe-rehearse=1', '--label', `msafe-owner=${OWNER}`, '--network', eng.needsNetwork ? name : 'none', ...eng.runArgs({ tmpfs })], { timeoutMs: 120000 });
     if (started.code !== 0) throw new RehearsalUsageError(`could not start ${spec.image}: ${firstLines(started.err, 2)}`);
     print(`runner: ${profile.label} (${detected.evidence}) · engine ${spec.image} in container ${name}`);
     await waitReady(eng, name, opts.startupTimeoutMs ?? eng.startupMs ?? 240000);

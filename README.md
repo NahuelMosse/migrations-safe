@@ -75,7 +75,7 @@ Alembic, Django, Knex and Rails generate SQL at run time: pipe it in with `-`.
 The linter is regex-based; for PostgreSQL also run `squawk`. Server-engine rehearsals need the `docker` CLI and
 reach the database only through `docker exec` (the container has no network); it is removed when the run ends,
 also on failure, Ctrl+C or SIGTERM. A run killed without a chance to clean up (TerminateProcess, a CI cancel)
-leaves its container, and the next run removes containers whose process is gone.
+leaves its container, and the next run on the same system (label `msafe-owner`) removes containers whose process is gone.
 
 ## CI
 
