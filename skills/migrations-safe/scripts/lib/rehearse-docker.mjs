@@ -53,8 +53,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // A pid only means something on the system that started the run, and one docker daemon can serve several
 // (Windows and its WSL distros share Docker Desktop and the hostname): each container and network is labelled
 // with its owner, and a run sweeps only its own system's. The owner ends with an id of the current boot of the
-// kernel: two systems that still share hostname and platform (a WSL distro without WSL_DISTRO_NAME, containers on
-// the host network) do not share a boot, and a pid from before a reboot is never taken for a live one.
+// kernel. It covers reboots of the same host: a pid from before a reboot is never taken for a live one. It does
+// not separate systems that share a kernel (WSL2 distros, containers on the host network have the same boot id),
+// which is what WSL_DISTRO_NAME in the label is for.
 export const bootIdOf = (platform, { readText = (p) => readFileSync(p, 'utf8'), run = (cmd, args) => spawnSync(cmd, args, { encoding: 'utf8', timeout: 5000, windowsHide: true }).stdout } = {}) => {
   try {
     if (platform === 'linux') return readText('/proc/sys/kernel/random/boot_id').trim();

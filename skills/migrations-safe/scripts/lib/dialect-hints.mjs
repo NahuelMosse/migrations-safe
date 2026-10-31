@@ -1,6 +1,7 @@
 // The database engine a project uses, read from the files that sit next to its migrations: the migration tool's
-// config (Flyway, Liquibase, an SSDT .sqlproj), the .NET project (EF Core provider, connection strings) and
-// the compose file that starts the database. Nothing here runs or connects to anything.
+// config (Flyway, Liquibase, an SSDT .sqlproj, Spring Boot's application.properties/yml), the build files
+// (Maven, Gradle, .NET project, appsettings) and the compose file that starts the database. Nothing here runs or
+// connects to anything.
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -11,13 +12,19 @@ const JDBC = { sqlserver: 'mssql', oracle: 'oracle', db2: 'db2', postgresql: 'po
 const DBMS = { mssql: 'mssql', sqlserver: 'mssql', oracle: 'oracle', db2: 'db2', postgresql: 'postgres', postgres: 'postgres', mysql: 'mysql', mariadb: 'mysql', sqlite: 'sqlite' };
 const uncommented = (text) => text.split(/\r?\n/).filter((l) => !/^\s*[#;]/.test(l)).join('\n');
 
-// Most specific source first: what the migration tool is configured to connect to beats what a .NET project
-// references, and that beats what a compose file happens to start.
+// Most specific source first. Tier 1 is what the migration tool itself is configured with (and the data access
+// layer that runs the migrations): it is trusted over what the SQL looks like. Tier 2 is what the application
+// references, tier 3 what a compose file happens to start; those yield to engine-specific syntax.
 const TIER_TOOL = 1;
 const TIER_APP = 2;
 const TIER_COMPOSE = 3;
 
 const jdbcDialects = (text) => [...uncommented(text).matchAll(/jdbc:(\w+):/gi)].map((m) => JDBC[m[1].toLowerCase()]).filter(Boolean);
+
+const DRIVER_CLASS = [
+  ['oracle', /oracle\.jdbc\./i], ['mssql', /com\.microsoft\.sqlserver\./i], ['db2', /com\.ibm\.db2\./i],
+  ['postgres', /org\.postgresql\./i], ['mysql', /com\.mysql\.|org\.mariadb\./i],
+];
 
 const COMPOSE = ['docker-compose.yml', 'docker-compose.yaml', 'compose.yml', 'compose.yaml', 'docker-compose.override.yml', 'docker-compose.override.yaml'];
 const IMAGES = [
@@ -29,14 +36,39 @@ const IMAGES = [
 ];
 const imageDialect = (ref) => IMAGES.find(([, re]) => re.test(ref))?.[0];
 
-const EF = [
-  ['mssql', /Microsoft\.EntityFrameworkCore\.SqlServer|dbup-sqlserver|Microsoft\.Data\.SqlClient|System\.Data\.SqlClient/i],
-  ['oracle', /Oracle\.EntityFrameworkCore|Oracle\.ManagedDataAccess|dbup-oracle/i],
-  ['db2', /IBM\.EntityFrameworkCore|IBM\.Data\.Db2|Net5\.IBM\.Data\.Db2/i],
-  ['postgres', /Npgsql|dbup-postgresql/i],
-  ['mysql', /Pomelo\.EntityFrameworkCore\.MySql|MySql\.EntityFrameworkCore|MySqlConnector|dbup-mysql/i],
-  ['sqlite', /Microsoft\.EntityFrameworkCore\.Sqlite|Microsoft\.Data\.Sqlite|dbup-sqlite/i],
+// .NET: the provider of the data access layer that runs the migrations (tier 1) and the plain drivers (tier 2).
+const DOTNET_PROVIDER = [
+  ['mssql', /Microsoft\.EntityFrameworkCore\.SqlServer|dbup-sqlserver/i],
+  ['oracle', /Oracle\.EntityFrameworkCore|dbup-oracle/i],
+  ['db2', /IBM\.EntityFrameworkCore/i],
+  ['postgres', /Npgsql\.EntityFrameworkCore\.PostgreSQL|dbup-postgresql/i],
+  ['mysql', /Pomelo\.EntityFrameworkCore\.MySql|MySql\.EntityFrameworkCore|dbup-mysql/i],
+  ['sqlite', /Microsoft\.EntityFrameworkCore\.Sqlite|dbup-sqlite/i],
 ];
+const DOTNET_DRIVER = [
+  ['mssql', /Microsoft\.Data\.SqlClient|System\.Data\.SqlClient/i],
+  ['oracle', /Oracle\.ManagedDataAccess/i],
+  ['db2', /IBM\.Data\.Db2|Net5\.IBM\.Data\.Db2/i],
+  ['postgres', /Npgsql/i],
+  ['mysql', /MySqlConnector/i],
+  ['sqlite', /Microsoft\.Data\.Sqlite/i],
+];
+
+// JVM build files: Flyway's own database modules say which engine it migrates (tier 1); a JDBC driver only says
+// the application talks to it (tier 2).
+const JVM_FLYWAY = [
+  ['mssql', 'flyway-sqlserver'], ['oracle', 'flyway-database-oracle|flyway-oracle'], ['db2', 'flyway-database-db2|flyway-db2'],
+  ['mysql', 'flyway-mysql'], ['postgres', 'flyway-database-postgresql|flyway-postgresql'],
+];
+const JVM_DRIVER = [
+  ['oracle', 'ojdbc\\d*|ojdbc[\\w.-]*'], ['mssql', 'mssql-jdbc'], ['db2', 'db2jcc\\d*|jcc'],
+  ['postgres', 'postgresql'], ['mysql', 'mysql-connector-j|mysql-connector-java|mariadb-java-client'],
+];
+const artifact = (names) => new RegExp(String.raw`(?<![\w.-])(?:${names})(?![\w-])`, 'i');
+// Test-only dependencies (Testcontainers, test scope) say nothing about the engine of the migrations.
+const withoutTestDependencies = (file, text) => (file === 'pom.xml'
+  ? text.replace(/<dependency>(?:(?!<\/dependency>)[\s\S])*<\/dependency>/gi, (d) => (/<scope>\s*test\s*<\/scope>|testcontainers/i.test(d) ? '' : d))
+  : text.split(/\r?\n/).filter((l) => !/^\s*test\w*\s*[(\s'"]|testcontainers/i.test(l)).join('\n'));
 
 // A .NET connection string says which engine through the keys it uses.
 const connectionDialect = (cs) => {
@@ -47,6 +79,16 @@ const connectionDialect = (cs) => {
   if (/Initial Catalog|TrustServerCertificate|Trusted_Connection|Integrated Security|Server\s*=[^;]*;\s*Database\s*=|Data Source\s*=[^;]*(?:\\SQLEXPRESS|\(localdb\)|,1433\b)/i.test(cs)) return 'mssql';
   return null;
 };
+
+// Only the values under "ConnectionStrings" are database connections: "Host=rabbit;..." elsewhere is another service.
+const connectionStrings = (json) => {
+  const out = [];
+  for (const block of json.matchAll(/"ConnectionStrings"\s*:\s*\{([^}]*)\}/gi))
+    for (const m of block[1].matchAll(/"[^"\n]*"\s*:\s*"((?:[^"\\\n]|\\.)*)"/g)) out.push(m[1]);
+  return out;
+};
+
+const SPRING_DIRS = ['', join('src', 'main', 'resources'), join('src', 'main', 'resources', 'config'), 'config'];
 
 const hintsIn = (dir) => {
   const hints = [];
@@ -62,23 +104,41 @@ const hintsIn = (dir) => {
   }
   for (const f of names.filter((n) => /\.sqlproj$/i.test(n))) add('mssql', TIER_TOOL, f);
 
+  // Spring Boot keeps its configuration in the module's resources, away from db/migration
+  for (const sub of SPRING_DIRS) {
+    const where = join(dir, sub);
+    for (const f of listDir(where).filter((n) => /^(?:application|bootstrap)(?:-[\w.-]+)?\.(?:properties|ya?ml)$/i.test(n))) {
+      const text = uncommented(read(join(where, f)));
+      const from = join(sub, f).replaceAll('\\', '/');
+      for (const d of jdbcDialects(text)) add(d, TIER_TOOL, from);
+      for (const [d, re] of DRIVER_CLASS) if (re.test(text)) add(d, TIER_TOOL, from);
+    }
+  }
+  for (const f of ['pom.xml', 'build.gradle', 'build.gradle.kts']) {
+    const text = withoutTestDependencies(f, read(join(dir, f)));
+    if (!text) continue;
+    for (const [d, names] of JVM_FLYWAY) if (artifact(names).test(text)) add(d, TIER_TOOL, f);
+    for (const [d, names] of JVM_DRIVER) if (artifact(names).test(text)) add(d, TIER_APP, f);
+  }
+
   for (const f of names.filter((n) => /\.(?:cs|fs|vb)proj$/i.test(n))) {
     const text = read(join(dir, f));
-    for (const [d, re] of EF) if (re.test(text)) add(d, TIER_APP, f);
+    for (const [d, re] of DOTNET_PROVIDER) if (re.test(text)) add(d, TIER_TOOL, f);
+    for (const [d, re] of DOTNET_DRIVER) if (re.test(text)) add(d, TIER_APP, f);
   }
-  for (const f of names.filter((n) => /^appsettings(?:\.[\w-]+)?\.json$/i.test(n))) {
-    for (const m of read(join(dir, f)).matchAll(/"([^"\n]*=[^"\n]*)"/g)) add(connectionDialect(m[1]), TIER_APP, f);
-  }
+  for (const f of names.filter((n) => /^appsettings(?:\.[\w-]+)?\.json$/i.test(n)))
+    for (const cs of connectionStrings(read(join(dir, f)))) add(connectionDialect(cs), TIER_APP, f);
 
   for (const f of COMPOSE)
     for (const m of read(join(dir, f)).matchAll(/^\s*(?:-\s*)?image:\s*["']?([^\s"'#]+)/gim)) add(imageDialect(m[1]), TIER_COMPOSE, f);
   return hints;
 };
 
-// The engine declared in `dir`, or null when it holds no hint. { dialect, evidence, conflict } where `conflict`
-// lists what disagrees with the choice. When the most specific sources disagree among themselves nothing is
-// chosen (dialect null, `ambiguous` lists them): guessing between two engines is how a PostgreSQL rule set ends
-// up applied to SQL Server.
+// The engine declared in `dir`, or null when it holds no hint. { dialect, evidence, conflict, strong } where
+// `conflict` lists what disagrees with the choice and `strong` says the choice comes from the migration tool's own
+// configuration (so it outranks the syntax of a file). When the most specific sources disagree among themselves
+// nothing is chosen (dialect null, `ambiguous` lists them): guessing between two engines is how a PostgreSQL rule
+// set ends up applied to SQL Server.
 export const hintedDialect = (dir) => {
   const hints = hintsIn(dir);
   if (!hints.length) return null;
@@ -87,7 +147,7 @@ export const hintedDialect = (dir) => {
   const topTier = Math.min(...hints.map((h) => h.tier));
   const top = hints.filter((h) => h.tier === topTier);
   const engines = [...new Set(top.map((h) => h.dialect))];
-  if (engines.length > 1) return { dialect: null, evidence: null, ambiguous: uniq(hints), dir };
+  if (engines.length > 1) return { dialect: null, evidence: null, ambiguous: uniq(hints), strong: topTier === TIER_TOOL, dir };
   const others = hints.filter((h) => h.dialect !== engines[0]);
-  return { dialect: engines[0], evidence: `${top[0].from} in ${dir}`, conflict: others.length ? uniq(others) : null, dir };
+  return { dialect: engines[0], evidence: `${top[0].from} in ${dir}`, conflict: others.length ? uniq(others) : null, strong: topTier === TIER_TOOL, dir };
 };

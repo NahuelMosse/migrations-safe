@@ -18,12 +18,13 @@ const HOW_TO_SET = 'pass --dialect <name> or add `-- migration-lint: dialect <na
 // What to tell the reader about how the dialect was chosen, when it was not stated outright or not certain.
 const dialectNotes = (d) => {
   const name = DIALECT_LABEL[d.dialect];
-  if (d.source === 'assumed') {
-    const why = d.ambiguous ? `the project files disagree about the engine (${d.ambiguous.join('; ')}) and the SQL has no engine-specific syntax` : 'nothing in the project or the SQL names the engine';
-    return [`dialect assumed to be ${name}: ${why}; if that is wrong the ${name} rules misjudge the file — ${HOW_TO_SET}`];
-  }
+  if (d.source === 'assumed')
+    return [`dialect assumed to be ${name}: nothing in the project or the SQL names the engine; if that is wrong the ${name} rules misjudge the file — ${HOW_TO_SET}`];
+  if (d.source === 'syntax' && d.project)
+    return [`the syntax suggests ${name} but the project files say ${DIALECT_LABEL[d.project]} (${d.evidence}): using ${name}, the project's declaration is not strong enough to override it — ${HOW_TO_SET} if that is wrong`];
   if (d.source !== 'inferred') return [];
   const out = [`dialect ${name} inferred from ${d.evidence}; ${HOW_TO_SET} to override`];
+  if (d.syntax) out.push(`the syntax suggested ${DIALECT_LABEL[d.syntax]} but the project says ${name} (${d.evidence}): using ${name}, because the migration tool is configured for it — ${HOW_TO_SET} if that is wrong`);
   if (d.conflict) out.push(`other project files point to another engine (${d.conflict.join('; ')}): using ${name}, from the most specific source (migration tool config, then .NET project, then compose file) — ${HOW_TO_SET} if that is wrong`);
   return out;
 };
@@ -181,6 +182,8 @@ export const lintTargets = (opts) => {
     if (input.file && !dialectOfDir.has(dirname(input.file))) dialectOfDir.set(dirname(input.file), projectDialect(input.file));
     const project = input.file ? dialectOfDir.get(dirname(input.file)) : undefined;
     const decided = decideDialect(input.sql, { dialect: opts.dialect, project });
+    if (decided.source === 'ambiguous')
+      throw new UsageError(`cannot tell which database engine ${input.label} is for: the project files name more than one (${decided.ambiguous.join('; ')}) and the SQL has no engine-specific syntax — ${HOW_TO_SET}`);
     const dialect = decided.dialect;
     const projectDialectHere = project?.dialect ?? undefined;
     for (const n of dialectNotes(decided)) if (!notes.includes(n)) notes.push(n);

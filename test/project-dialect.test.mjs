@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { hintedDialect } from '../skills/migrations-safe/scripts/lib/dialect-hints.mjs';
-import { decideDialect, projectDialect } from '../skills/migrations-safe/scripts/lib/runners.mjs';
+import { decideDialect, projectDialect, sniffDialect } from '../skills/migrations-safe/scripts/lib/runners.mjs';
 import { lintCli, put, scratch } from './helpers.mjs';
 
 // Marker-free SQL: every engine accepts it, so only the project can say which rules apply.
@@ -118,18 +118,112 @@ test('sources that disagree: the most specific one wins and the warning names th
   assert.match(warning, /using SQL Server/);
 });
 
-test('sources of the same rank that disagree choose nothing: PostgreSQL is assumed with a warning that lists them', (t) => {
+test('sources of the same rank that disagree choose nothing: exit 2 listing the candidates and asking for --dialect or the directive', (t) => {
   const dir = scratch(t);
   put(dir, 'docker-compose.yml', 'services:\n  app-db:\n    image: mcr.microsoft.com/mssql/server:2022-latest\n  legacy:\n    image: gvenzl/oracle-free:23-slim-faststart\n');
   put(dir, 'V1__x.sql', DB2_SQL);
   const info = projectDialect(join(dir, 'V1__x.sql'));
   assert.equal(info.dialect, null);
   assert.equal(info.ambiguous.length, 2);
-  const r = lintJson(dir);
-  const note = noteMatching(r.notes, /dialect assumed to be PostgreSQL/);
-  assert.ok(note, r.notes.join('\n'));
-  assert.match(note, /disagree about the engine \(mssql from docker-compose\.yml; oracle from docker-compose\.yml\)/);
-  assert.deepEqual(lintJson(dir, ['--dialect', 'mssql']).notes.filter((n) => /dialect assumed/.test(n)), []);
+  const r = lintCli([dir]);
+  assert.equal(r.code, 2, r.out + r.err);
+  assert.match(r.err, /cannot tell which database engine .*V1__x\.sql is for/);
+  assert.match(r.err, /mssql from docker-compose\.yml; oracle from docker-compose\.yml/);
+  assert.match(r.err, /--dialect <name> or add `-- migration-lint: dialect <name>`/);
+  assert.notEqual(lintCli([dir, '--dialect', 'mssql']).code, 2, '--dialect settles it');
+  put(dir, 'V2__x.sql', `-- migration-lint: dialect db2\n${DB2_SQL}`);
+  assert.equal(lintCli([join(dir, 'V2__x.sql')]).code, 1, 'a directive settles it');
+  // syntax of one engine settles it too: the ambiguous hints are ignored
+  const marked = scratch(t);
+  put(marked, 'docker-compose.yml', 'services:\n  a:\n    image: postgres:16\n  b:\n    image: mariadb:11\n');
+  put(marked, 'V1__x.sql', 'ALTER TABLE [dbo].[orders] ADD [note] nvarchar(10) NULL;\nGO\n');
+  assert.ok(lintJson(marked).rules.some((id) => id.startsWith('mssql-')));
+});
+
+// The four probes of the review: an engine-specific-looking statement under a project that says otherwise.
+test('the migration tool configuration outranks what the syntax looks like, and says so when they disagree', (t) => {
+  const probe = (conf, sql, expected) => {
+    const dir = scratch(t);
+    put(dir, conf[0], conf[1]);
+    put(dir, 'V1__x.sql', sql);
+    const r = lintJson(dir);
+    assert.ok(r.rules.includes(expected), `${sql.slice(0, 40)}: ${r.rules.join()}`);
+    return r;
+  };
+  const oracleConf = ['flyway.conf', 'flyway.url=jdbc:oracle:thin:@//h:1521/XEPDB1\n'];
+  const db2Conf = ['flyway.conf', 'flyway.url=jdbc:db2://h:50000/SHOP\n'];
+  const modify = probe(oracleConf, 'ALTER TABLE orders MODIFY status NOT NULL;\n', 'oracle-ddl-lock-timeout');
+  assert.ok(!modify.notes.some((n) => /syntax suggested/.test(n)), 'the sniffer reads MODIFY ... NOT NULL as Oracle: nothing to disagree about');
+  const pragma = probe(oracleConf, "DECLARE\n  e EXCEPTION;\n  PRAGMA EXCEPTION_INIT(e, -1430);\nBEGIN\n  EXECUTE IMMEDIATE 'ALTER TABLE orders ADD (c NUMBER)';\nEXCEPTION WHEN e THEN NULL;\nEND;\n/\n", 'oracle-ddl-lock-timeout');
+  assert.ok(!pragma.rules.includes('transaction-conflict'), pragma.rules.join());
+  const rename = probe(db2Conf, 'ALTER TABLE orders DROP COLUMN note;\nRENAME TABLE orders TO orders_old;\n', 'db2-reorg-pending');
+  assert.match(rename.notes.join('\n'), /the syntax suggested MySQL but the project says Db2 \(flyway\.conf in .*\): using Db2/);
+  const nvarchar = probe(db2Conf, 'ALTER TABLE orders ADD COLUMN note NVARCHAR(10);\nALTER TABLE orders DROP COLUMN old;\n', 'db2-reorg-pending');
+  assert.match(nvarchar.notes.join('\n'), /the syntax suggested SQL Server but the project says Db2/);
+  // explicit choices stay on top of the project
+  const dir = scratch(t);
+  put(dir, ...db2Conf);
+  put(dir, 'V1__x.sql', 'ALTER TABLE t ADD [c] int;\nGO\n');
+  assert.ok(lintJson(dir, ['--dialect', 'mssql']).rules.some((id) => id.startsWith('mssql-')));
+  put(dir, 'V2__y.sql', `-- migration-lint: dialect mssql\n${MSSQL_SQL}`);
+  assert.ok(lintJson(join(dir, 'V2__y.sql')).rules.includes('mssql-add-not-null-default'));
+});
+
+test('the sniffer does not read Oracle MODIFY or PL/SQL pragmas as MySQL or SQLite', () => {
+  assert.equal(sniffDialect('ALTER TABLE orders MODIFY status NOT NULL;'), 'oracle');
+  assert.equal(sniffDialect('ALTER TABLE orders MODIFY status DEFAULT 1;'), 'oracle');
+  assert.equal(sniffDialect('ALTER TABLE orders MODIFY status NULL;'), 'oracle');
+  assert.equal(sniffDialect('ALTER TABLE orders MODIFY status VARCHAR(20) NOT NULL;'), 'mysql');
+  assert.equal(sniffDialect('DECLARE e EXCEPTION; PRAGMA EXCEPTION_INIT(e, -1); BEGIN NULL; END;'), 'oracle');
+  assert.equal(sniffDialect('PRAGMA foreign_keys = ON;'), 'sqlite');
+});
+
+test('only the values under ConnectionStrings count in appsettings*.json', (t) => {
+  const dir = scratch(t);
+  put(dir, 'appsettings.json', '{\n  "RabbitMq": { "Url": "host=rabbit;port=5672;username=guest" },\n  // comment\n  "ConnectionStrings": { "Db": "Server=tcp:db,1433;Database=shop;User Id=sa;TrustServerCertificate=True" },\n  "Other": "Host=elsewhere;Database=x"\n}\n');
+  assert.equal(hintedDialect(dir).dialect, 'mssql');
+  assert.equal(hintedDialect(dir).conflict, null);
+  const only = scratch(t);
+  put(only, 'appsettings.json', '{ "RabbitMq": { "Url": "host=rabbit;port=5672" }, "Smtp": "Server=mail;Database=x;Uid=u" }');
+  assert.equal(hintedDialect(only), null);
+});
+
+test('Spring Boot: the config in src/main/resources and the build file at the module root name the engine', (t) => {
+  const layout = (files, sql = ORACLE_SQL) => {
+    const dir = scratch(t);
+    for (const [f, text] of Object.entries(files)) put(dir, f, text);
+    put(dir, 'src/main/resources/db/migration/V1__x.sql', sql);
+    return projectDialect(join(dir, 'src', 'main', 'resources', 'db', 'migration', 'V1__x.sql'));
+  };
+  const props = layout({ 'src/main/resources/application.properties': 'spring.datasource.url=jdbc:oracle:thin:@//h:1521/XEPDB1\nspring.datasource.username=app\n' });
+  assert.deepEqual([props.dialect, props.strong], ['oracle', true]);
+  assert.match(props.evidence, /application\.properties/);
+  assert.equal(layout({ 'src/main/resources/application-prod.yml': 'spring:\n  flyway:\n    url: jdbc:sqlserver://h:1433;databaseName=shop\n' }).dialect, 'mssql');
+  assert.equal(layout({ 'src/main/resources/application.yml': 'spring:\n  datasource:\n    driver-class-name: com.ibm.db2.jcc.DB2Driver\n' }).dialect, 'db2');
+  assert.equal(layout({ 'src/main/resources/config/application.properties': 'spring.datasource.url=jdbc:mysql://h/shop\n' }).dialect, 'mysql');
+  assert.equal(layout({ 'src/main/resources/application.yml': '# url: jdbc:oracle:thin:@x\nspring:\n  datasource:\n    url: jdbc:postgresql://h/shop\n' }).dialect, 'postgres');
+  // no config in resources: the build file at the module root
+  assert.equal(layout({ 'pom.xml': '<dependencies><dependency><groupId>org.flywaydb</groupId><artifactId>flyway-sqlserver</artifactId></dependency></dependencies>' }).dialect, 'mssql');
+  assert.equal(layout({ 'pom.xml': '<dependency><artifactId>flyway-database-oracle</artifactId></dependency>' }).dialect, 'oracle');
+  assert.equal(layout({ 'build.gradle.kts': 'dependencies {\n  implementation("org.flywaydb:flyway-database-db2")\n}\n' }).dialect, 'db2');
+  assert.equal(layout({ 'build.gradle': "dependencies {\n  implementation 'org.flywaydb:flyway-mysql'\n}" }).dialect, 'mysql');
+  assert.equal(layout({ 'pom.xml': '<dependency><artifactId>flyway-database-postgresql</artifactId></dependency>' }).dialect, 'postgres');
+  // JDBC drivers are weaker evidence than Flyway's own module, and a Testcontainers dependency says nothing
+  const driver = layout({ 'pom.xml': '<dependency><groupId>com.oracle.database.jdbc</groupId><artifactId>ojdbc11</artifactId></dependency>' });
+  assert.deepEqual([driver.dialect, driver.strong], ['oracle', false]);
+  assert.equal(layout({ 'build.gradle': "dependencies {\n  runtimeOnly 'com.microsoft.sqlserver:mssql-jdbc'\n  testImplementation 'org.testcontainers:postgresql'\n}" }).dialect, 'mssql');
+  assert.equal(layout({ 'pom.xml': '<dependency><artifactId>mssql-jdbc</artifactId></dependency><dependency><groupId>org.testcontainers</groupId><artifactId>postgresql</artifactId><scope>test</scope></dependency>' }).dialect, 'mssql');
+  assert.equal(layout({ 'pom.xml': '<dependency><artifactId>mysql-connector-j</artifactId></dependency>' }).dialect, 'mysql');
+  assert.equal(layout({ 'build.gradle': "dependencies { implementation 'org.mariadb.jdbc:mariadb-java-client' }" }).dialect, 'mysql');
+  assert.equal(layout({ 'build.gradle': "dependencies { implementation 'com.ibm.db2:jcc:11.5.9.0' }" }).dialect, 'db2');
+});
+
+test('Spring Boot end to end: marker-free Oracle SQL under src/main/resources/db/migration gets the Oracle rules', (t) => {
+  const dir = scratch(t);
+  put(dir, 'src/main/resources/application.yml', 'spring:\n  datasource:\n    url: jdbc:oracle:thin:@//h:1521/XEPDB1\n');
+  put(dir, 'src/main/resources/db/migration/V1__index.sql', ORACLE_SQL);
+  const r = lintJson(join(dir, 'src', 'main', 'resources', 'db', 'migration'));
+  assert.ok(r.rules.includes('oracle-index-not-online'), r.rules.join());
 });
 
 test('the nearest directory with a hint decides, and Prisma\'s declared provider still outranks the syntax', (t) => {

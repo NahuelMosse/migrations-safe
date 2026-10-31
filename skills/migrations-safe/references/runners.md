@@ -7,16 +7,27 @@ Detection order: `--runner`; the project's config files (searched upwards from t
 root, including a `.sqlproj`, a `*ModelSnapshot.cs` and a `.csproj` that references `dbup-`); markers inside the
 file (`-- +goose`, `-- migrate:up`, `__EFMigrationsHistory`, `tmp_ms_xx_`); the file name; otherwise `raw`.
 Dialect: `--dialect`; a `-- migration-lint: dialect sqlite` line; `migration_lock.toml` (provider `sqlserver`
-too) or the Drizzle config; the syntax; the engine the project's files name; otherwise PostgreSQL, and then the
-run prints `dialect assumed to be PostgreSQL` with how to change it. The project's files are read in the nearest
-directory upwards that holds one, most specific first: the jdbc URL in `flyway.conf` / `flyway.toml` /
-`liquibase.properties`, a Liquibase changelog `dbms`, an SSDT `.sqlproj` (SQL Server); the EF Core / DbUp provider
-package in a `.csproj` and the connection strings in `appsettings*.json`; the `image:` of a compose file
-(`mcr.microsoft.com/mssql/server`, `gvenzl/oracle-*`, `container-registry.oracle.com/database`,
-`icr.io/db2_community/db2`, `postgres`, `mysql`, `mariadb`). If a more specific source disagrees with a less
-specific one the first wins and the run warns, naming the other; if sources of the same rank disagree (a compose
-file with SQL Server and Oracle) nothing is chosen, PostgreSQL is assumed and the warning lists them: pass
-`--dialect`. Syntax markers beat an inferred engine. Syntax markers, strongest first: `--#SET
+too) or the Drizzle config; the migration tool's own configuration (below); the syntax; the other files of the
+project; otherwise PostgreSQL, and then the run prints `dialect assumed to be PostgreSQL` with how to change it.
+The project's files are read in the nearest directory upwards that holds one, most specific first:
+1. The migration tool's configuration, which outranks the syntax (Oracle's `MODIFY col NOT NULL`, Db2's `RENAME
+   TABLE` and `NVARCHAR` look like MySQL or SQL Server; when the syntax suggests another engine the run says so and
+   uses the project's): the jdbc URL in `flyway.conf` / `flyway.toml` / `liquibase.properties`, a Liquibase changelog
+   `dbms`, an SSDT `.sqlproj`; the EF Core / DbUp provider package in a `.csproj`; Spring Boot's
+   `application*.properties|yml` (`spring.datasource.url`, `spring.flyway.url`, a jdbc URL, a driver class) in the
+   directory, `src/main/resources` or `config`; Flyway's database module in `pom.xml` / `build.gradle(.kts)`
+   (`flyway-sqlserver`, `flyway-database-oracle`, `flyway-database-db2`, `flyway-mysql`, `flyway-database-postgresql`).
+2. What the application references, which yields to engine-specific syntax: a JDBC driver in `pom.xml` /
+   `build.gradle(.kts)` (`ojdbc*`, `mssql-jdbc`, `jcc`, `postgresql`, `mysql-connector-j`, `mariadb-java-client`;
+   test-scoped and Testcontainers dependencies are ignored), plain .NET drivers, and the values under
+   `ConnectionStrings` in `appsettings*.json`.
+3. The `image:` of a compose file (`mcr.microsoft.com/mssql/server`, `gvenzl/oracle-*`,
+   `container-registry.oracle.com/database`, `icr.io/db2_community/db2`, `postgres`, `mysql`, `mariadb`).
+
+If a more specific source disagrees with a less specific one the first wins and the run warns, naming the other. If
+sources of the same rank disagree (a compose file with SQL Server and Oracle) and the SQL has no engine-specific
+syntax, nothing can be chosen: the run exits 2 listing the candidates, and `--dialect` or the directive settles it.
+Syntax markers, strongest first: `--#SET
 TERMINATOR`, `ADMIN_CMD`, `SYSPROC.`, `SET CURRENT LOCK TIMEOUT` mean Db2; `GO` alone on a line, a `[bracketed]`
 identifier, `sp_rename`, `nvarchar` mean SQL Server; `/` alone on a line, `VARCHAR2`, `EXECUTE IMMEDIATE`,
 `FROM dual` mean Oracle; backticks, `AUTO_INCREMENT`, `MODIFY COLUMN` mean MySQL; `PRAGMA`, `AUTOINCREMENT` mean

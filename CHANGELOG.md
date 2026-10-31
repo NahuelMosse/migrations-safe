@@ -5,8 +5,10 @@
 SQL Server, Oracle and Db2 LUW at the depth MySQL got in 1.1.
 
 - The dialect is also inferred from the files next to the migrations (Flyway and Liquibase jdbc URL, `.sqlproj`,
-  EF Core provider, connection strings, compose images); when nothing names the engine, PostgreSQL is assumed and
-  the run says so and how to change it; disagreeing sources are reported.
+  EF Core provider, Spring Boot `application*.properties|yml`, Maven/Gradle dependencies, connection strings,
+  compose images). The migration tool's own configuration outranks the syntax of a file; a disagreement is
+  reported. When nothing names the engine, PostgreSQL is assumed and the run says so and how to change it; sources
+  of the same rank that disagree make the run exit 2 asking for `--dialect`.
 - `migration-lint` knows three more dialects, detected from strong syntax markers (`GO`, `[x]`, `sp_rename`;
   `/`, `VARCHAR2`, `EXECUTE IMMEDIATE`; `--#SET TERMINATOR`, `ADMIN_CMD`, `SYSPROC.`) and never from
   `GENERATED ... IDENTITY`. `--server-version` (alias `--mysql-version` for MySQL) and `--edition

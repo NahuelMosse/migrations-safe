@@ -217,11 +217,15 @@ export const sniffMarkers = (sql) => {
   if (/^\s*--#\s*SET\s+TERMINATOR\b/im.test(sql)) return 'db2';
   const code = sql.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/--[^\n]*/g, ' ');
   const bare = code.replace(/'(?:[^']|'')*'/g, "''");
-  if (/\bpragma\b|\bautoincrement\b|\bwithout rowid\b/i.test(code)) return 'sqlite';
+  // PL/SQL has its own pragmas (EXCEPTION_INIT, AUTONOMOUS_TRANSACTION): they are Oracle, not SQLite
+  const plsqlPragma = /\bpragma\s+(?:exception_init|autonomous_transaction|serially_reusable|restrict_references|udf)\b/i;
+  if (/\bpragma\b|\bautoincrement\b|\bwithout rowid\b/i.test(code.replace(new RegExp(plsqlPragma, 'gi'), ' '))) return 'sqlite';
   if (/\badmin_cmd\b|\bsysproc\.|\bsysibm\.|\bwlm_set_client_info\b|\bcurrent\s+lock\s+timeout\b|\bset\s+integrity\b|\breorg\s+table\b/i.test(bare)) return 'db2';
   if (/^\s*go(?:\s+\d+)?\s*$/im.test(bare) || /(?:^|[\s.(,])\[[A-Za-z_][\w ]*\](?=[\s.,;)=]|$)/.test(bare)
     || /\bsp_rename\b|\bnvarchar\b|\bidentity\s*\(\s*\d|\bgetdate\s*\(|\bset\s+nocount\b|\bwith\s*\(\s*online\s*=/i.test(bare)) return 'mssql';
-  if (/^\s*\/\s*$/m.test(bare) || /\bvarchar2\b|\bnvarchar2\b|\bexecute\s+immediate\b|\bfrom\s+dual\b|\bddl_lock_timeout\b|\bdbms_\w+|\bset\s+unused\b|\benable\s+novalidate\b|\bnumber\s*\(\s*\d|\bmodify\s*\(/i.test(bare)) return 'oracle';
+  if (/^\s*\/\s*$/m.test(bare) || /\bvarchar2\b|\bnvarchar2\b|\bexecute\s+immediate\b|\bfrom\s+dual\b|\bddl_lock_timeout\b|\bdbms_\w+|\bset\s+unused\b|\benable\s+novalidate\b|\bnumber\s*\(\s*\d|\bmodify\s*\(/i.test(bare) || plsqlPragma.test(bare)
+    // MODIFY col NOT NULL / DEFAULT ...: MySQL's MODIFY always restates the type
+    || /\bmodify\s+(?:\w+|"[^"]+")\s+(?:not\s+null|null|default|constraint|encrypt|decrypt|invisible|visible)\b/i.test(bare)) return 'oracle';
   if (/\bengine\s*=|\bauto_increment\b|\bunsigned\b|\bmodify\s+(?:column\s+)?[\w`]|\brename\s+table\b|`\w+`/i.test(code)) return 'mysql';
   return null;
 };
@@ -243,7 +247,15 @@ export const decideDialect = (sql, { dialect, project } = {}) => {
   if (DIALECTS.includes(directive)) return { dialect: directive, source: 'directive' };
   if (project?.declared) return { dialect: project.dialect, source: 'declared', evidence: project.evidence };
   const marked = sniffMarkers(sql);
-  if (marked) return { dialect: marked, source: 'syntax' };
-  if (project?.dialect) return { dialect: project.dialect, source: 'inferred', evidence: project.evidence, conflict: project.conflict };
-  return { dialect: 'postgres', source: 'assumed', ambiguous: project?.ambiguous ?? null };
+  const named = project?.dialect ?? null;
+  // the migration tool's own configuration outranks what the SQL looks like (Oracle's MODIFY looks like MySQL's,
+  // Db2's RENAME TABLE and NVARCHAR look like MySQL and SQL Server): when they disagree the run says so
+  if (named && project.strong) {
+    const disagrees = marked && marked !== named ? { syntax: marked } : {};
+    return { dialect: named, source: 'inferred', evidence: project.evidence, conflict: project.conflict, ...disagrees };
+  }
+  if (marked) return { dialect: marked, source: 'syntax', ...(named && named !== marked ? { project: named, evidence: project.evidence } : {}) };
+  if (named) return { dialect: named, source: 'inferred', evidence: project.evidence, conflict: project.conflict };
+  if (project?.ambiguous) return { dialect: null, source: 'ambiguous', ambiguous: project.ambiguous };
+  return { dialect: 'postgres', source: 'assumed' };
 };
