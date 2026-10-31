@@ -37,7 +37,6 @@ test('packaging files agree with each other', () => {
   const pkg = JSON.parse(read(join(ROOT, 'package.json')));
   const plugin = JSON.parse(read(join(ROOT, '.claude-plugin/plugin.json')));
   const market = JSON.parse(read(join(ROOT, '.claude-plugin/marketplace.json')));
-  assert.equal(pkg.private, true);
   assert.equal(pkg.type, 'module');
   assert.equal(pkg.license, 'MIT');
   assert.equal(pkg.engines.node, '>=22.13');
