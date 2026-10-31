@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.2.1-rc.1
+
+A prerelease that tests publishing from GitHub Actions; same contents as 1.2.0.
+
 ## 1.2.0
 
 SQL Server, Oracle and Db2 LUW at the depth MySQL got in 1.1; published as the `migrations-safe` npm package, with a
