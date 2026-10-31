@@ -14,7 +14,8 @@ const shq = (s) => `'${s.replaceAll("'", "'\\''")}'`;
 // `~`, not `@`: an e-mail address in a literal must not end a statement
 const T = '~';
 
-const POLL = `SELECT l.LOCK_MODE || CHR(9) || LOWER(l.TABNAME) FROM TABLE(MON_GET_LOCKS(NULL, -2)) l JOIN TABLE(MON_GET_CONNECTION(NULL, -2)) c ON c.APPLICATION_HANDLE = l.APPLICATION_HANDLE WHERE l.LOCK_OBJECT_TYPE = 'TABLE' AND l.TABSCHEMA = '${OWNER}' AND c.CLIENT_APPLNAME = '${MIGRATION_APP}' AND l.LOCK_MODE IN ('Z', 'X', 'S', 'SIX')${T}`;
+// MON_GET_LOCKS names a table by tablespace and table id, not by name: SYSCAT.TABLES translates them
+const POLL = `SELECT l.LOCK_MODE || CHR(9) || LOWER(t.TABNAME) FROM TABLE(MON_GET_LOCKS(NULL, -2)) l JOIN SYSCAT.TABLES t ON t.TBSPACEID = l.TBSP_ID AND t.TABLEID = l.TAB_FILE_ID JOIN TABLE(MON_GET_CONNECTION(NULL, -2)) c ON c.APPLICATION_HANDLE = l.APPLICATION_HANDLE WHERE l.LOCK_OBJECT_TYPE = 'TABLE' AND t.TABSCHEMA = '${OWNER}' AND c.CLIENT_APPLNAME = '${MIGRATION_APP}' AND l.LOCK_MODE IN ('Z', 'X', 'S', 'SIX')${T}`;
 // the markers the shared code reads start with two at signs
 const AT = 'CHR(64) || CHR(64)';
 const EPOCH = (tag) => `VALUES ${AT} || '${tag} ' ||TRIM(CHAR(DECIMAL((DAYS(CURRENT TIMESTAMP - CURRENT TIMEZONE) - DAYS('1970-01-01')) * 86400 + MIDNIGHT_SECONDS(CURRENT TIMESTAMP - CURRENT TIMEZONE) + MICROSECOND(CURRENT TIMESTAMP) / 1000000.0, 20, 6)))${T}\n`;
