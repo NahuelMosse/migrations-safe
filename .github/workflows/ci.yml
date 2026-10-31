@@ -1,0 +1,58 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        node: ['22.13', '24']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - run: npm test
+      - name: Good fixtures lint clean
+        run: node skills/migrations-safe/scripts/migration-lint.mjs skills/migrations-safe/fixtures/good --strict
+      - name: Bad fixtures are rejected
+        shell: bash
+        run: |
+          expect_exit_1() {
+            code=0
+            "$@" > /dev/null || code=$?
+            if [ "$code" -ne 1 ]; then echo "expected exit 1, got $code: $*"; exit 1; fi
+          }
+          for d in postgres postgres-locks mysql sqlite sqlite-rebuild; do
+            expect_exit_1 node skills/migrations-safe/scripts/migration-lint.mjs "skills/migrations-safe/fixtures/bad/$d"
+          done
+      - name: Rehearse the SQLite fixtures
+        shell: bash
+        run: |
+          S=skills/migrations-safe
+          node $S/scripts/rehearse-sqlite.mjs $S/fixtures/seed-sqlite.sql $S/fixtures/good/sqlite/0007_tasks_due.sql
+          code=0
+          node $S/scripts/rehearse-sqlite.mjs $S/fixtures/seed-sqlite.sql $S/fixtures/bad/sqlite-rebuild/0009_tasks_drop_priority.sql > /dev/null || code=$?
+          if [ "$code" -ne 1 ]; then echo "the lossy rebuild must exit 1, got $code"; exit 1; fi
+
+  validate:
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: npx --yes @anthropic-ai/claude-code plugin validate .

@@ -1,0 +1,12 @@
+{
+  "name": "migrations-safe",
+  "description": "Write and review database migrations that do not lose data, break running code or lock a busy table.",
+  "owner": { "name": "Nahuel Mosse" },
+  "plugins": [
+    {
+      "name": "migrations-safe",
+      "source": "./",
+      "description": "Migration linter, git history checks and SQLite rehearsal, with a skill that guides the fixes."
+    }
+  ]
+}

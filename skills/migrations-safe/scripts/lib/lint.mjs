@@ -1,0 +1,160 @@
+// Lints a set of migration files: finds them, picks the runner profile and dialect of each, runs the rules,
+// and adds the checks that need the neighbouring files (down siblings, earlier schema, git history).
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { basename, dirname, join, relative, resolve } from 'node:path';
+import { UsageError } from './errors.mjs';
+import { HistoryError, historyFindings, isMigrationFile } from './history.mjs';
+import { decodeSql, parse } from './parse.mjs';
+import { ERROR, WARN, lintSql } from './rules.mjs';
+import { PROFILES, RUNNER_IDS, DIALECTS, detectRunner, profileOf, projectDialect, runnerFromMarkers, sniffDialect } from './runners.mjs';
+import { applySql, cloneSchema } from './schema.mjs';
+
+export { UsageError };
+
+const SKIP_DIRS = new Set(['node_modules', '.git']);
+export const isDownFile = (f) => /\.down\.sql$/i.test(basename(f)) || /^down\.sql$/i.test(basename(f)) || /^U\d+(?:[._]\d+)*__/.test(basename(f));
+
+const sqlFiles = (path) => {
+  if (statSync(path).isFile()) return [path];
+  return readdirSync(path).filter((n) => !SKIP_DIRS.has(n)).sort().flatMap((n) => sqlFiles(join(path, n)));
+};
+
+// A down that sits next to the file: x.down.sql, folder/down.sql, Flyway's U<n>__x.sql.
+const hasDownSibling = (file) => {
+  const b = basename(file);
+  const dir = dirname(file);
+  const candidates = [];
+  if (/\.up\.sql$/i.test(b)) candidates.push(join(dir, b.replace(/\.up\.sql$/i, '.down.sql')));
+  if (/^up\.sql$/i.test(b)) candidates.push(join(dir, 'down.sql'));
+  if (/^V\d/.test(b)) candidates.push(join(dir, b.replace(/^V/, 'U')));
+  return candidates.some(existsSync);
+};
+
+// Schema of the tables as earlier migrations of the same folder left them.
+const createSchemaSource = (seed) => {
+  const groups = new Map();
+  const groupFiles = (file) => {
+    if (/^migration\.sql$/i.test(basename(file))) {
+      const root = dirname(dirname(file));
+      return readdirSync(root).sort().map((d) => join(root, d, 'migration.sql')).filter(existsSync);
+    }
+    const dir = dirname(file);
+    return readdirSync(dir).filter((n) => /\.sql$/i.test(n) && !isDownFile(n)).sort().map((n) => join(dir, n));
+  };
+  return (file) => {
+    const abs = resolve(file);
+    const files = groupFiles(abs);
+    const idx = files.indexOf(abs);
+    const key = dirname(files[0] ?? abs);
+    let state = groups.get(key);
+    if (!state || state.i > idx) { state = { i: 0, schema: cloneSchema(seed) }; groups.set(key, state); }
+    for (; state.i < idx; state.i++) {
+      const sql = decodeSql(readFileSync(files[state.i]));
+      applySql(state.schema, sql, sniffDialect(sql));
+    }
+    return cloneSchema(state.schema);
+  };
+};
+
+export const loadSchemaSeed = (paths) => {
+  const seed = new Map();
+  for (const p of paths) {
+    if (!existsSync(p)) throw new UsageError(`--schema ${p} does not exist`);
+    for (const f of sqlFiles(p).filter((x) => !isDownFile(x))) {
+      const sql = decodeSql(readFileSync(f));
+      applySql(seed, sql, sniffDialect(sql));
+    }
+  }
+  return seed;
+};
+
+// Flyway reads `V2__x.sql.conf` beside a script; executeInTransaction=false runs it outside a transaction.
+const flywayNoTransaction = (file) => {
+  const conf = `${file}.conf`;
+  return existsSync(conf) && /^\s*executeInTransaction\s*=\s*false\s*$/im.test(readFileSync(conf, 'utf8'));
+};
+
+// git reports the repository's real path; the working directory may sit behind a symlink (macOS /var → /private/var).
+// Resolve the deepest existing ancestor, so deleted files still get a path relative to the working directory.
+const realPath = (path) => {
+  try {
+    return realpathSync(path);
+  } catch (e) {
+    if (e.code !== 'ENOENT') throw e;
+    const parent = dirname(path);
+    return parent === path ? path : join(realPath(parent), basename(path));
+  }
+};
+
+const relPath = (file) => relative(realPath(process.cwd()), realPath(resolve(file))).replaceAll('\\', '/') || file;
+
+// opts: { paths, stdin (string|null), dialect, runner, history, repo, base, schema: [] }
+export const lintTargets = (opts) => {
+  if (opts.runner && !RUNNER_IDS.includes(opts.runner)) throw new UsageError(`unknown runner ${opts.runner} (${RUNNER_IDS.join(', ')})`);
+  if (opts.dialect && !DIALECTS.includes(opts.dialect)) throw new UsageError(`unknown dialect ${opts.dialect} (${DIALECTS.join(', ')})`);
+  const findings = [];
+  const notes = [];
+  let history = null;
+  let paths = [...opts.paths];
+  let fresh = new Set();
+  const repo = resolve(opts.repo ?? '.');
+  if (opts.history) {
+    history = historyFindings(repo, opts.base, { runner: opts.runner });
+    findings.push(...history.findings.map((f) => ({ ...f, file: relPath(resolve(repo, f.file)) })));
+    fresh = new Set(history.fresh.map((f) => resolve(repo, f)));
+    if (!paths.length) paths = history.fresh.filter((f) => /\.sql$/i.test(f)).map((f) => join(repo, f));
+    for (const f of history.fresh.filter((x) => !/\.sql$/i.test(x) && isMigrationFile(x))) {
+      const hint = PROFILES[opts.runner ?? detectRunner(join(repo, dirname(f))).id].hint;
+      findings.push({ level: WARN, rule: 'unlinted-migration', file: relPath(resolve(repo, f)), line: 1, message: `${f} is not SQL, so the linter did not read it: lint the SQL its runner produces (pipe it to \`migration-lint.mjs -\`)${hint ? `, for example \`${hint}\`` : ''}` });
+    }
+  }
+
+  const inputs = [];
+  if (opts.stdin !== null && opts.stdin !== undefined) inputs.push({ label: '<stdin>', sql: opts.stdin, file: null });
+  const list = paths.filter((p) => p !== '-').flatMap((p) => {
+    if (!existsSync(p)) throw new UsageError(`${p} does not exist`);
+    return sqlFiles(p).filter((f) => /\.sql$/i.test(f) && !isDownFile(f));
+  });
+  const sorted = [...new Set(list.map((f) => resolve(f)))].sort();
+  for (const f of sorted) inputs.push({ label: relPath(f), sql: decodeSql(readFileSync(f)), file: f });
+
+  if (!inputs.length) {
+    if (opts.history && !opts.paths.length) {
+      const unread = history.fresh.filter(isMigrationFile);
+      if (unread.length) throw new UsageError(`${unread.length} new migration file(s) (${unread.slice(0, 3).join(', ')}) but none is SQL, so nothing was linted: pipe the SQL their runner produces to \`migration-lint.mjs -\` (with --history to keep the git checks)`);
+      notes.push(`no new migrations since ${history.base.label} (merge-base ${history.base.mergeBase.slice(0, 8)})`);
+    } else {
+      const hint = opts.paths.map((p) => (existsSync(p) ? detectRunner(p) : null)).find((d) => d && PROFILES[d.id].generatesSql);
+      throw new UsageError(`0 SQL migration files found in ${opts.paths.join(', ') || 'the arguments'}, so nothing was checked${hint ? `: ${PROFILES[hint.id].label} generates its SQL at run time — pipe it to \`migration-lint.mjs -\` (${PROFILES[hint.id].hint})` : ''}`);
+    }
+  }
+
+  const seed = loadSchemaSeed(opts.schema ?? []);
+  const schemaOf = createSchemaSource(seed);
+  const createdBefore = new Set();
+  const dialectOfDir = new Map();
+  for (const input of inputs) {
+    const markers = parse(input.sql).markers;
+    const detected = input.file ? detectRunner(input.file, { markers, fileName: basename(input.file) }) : (runnerFromMarkers(markers) ?? { id: 'raw' });
+    const profile = profileOf(opts.runner ?? detected.id);
+    if (input.file && !dialectOfDir.has(dirname(input.file))) dialectOfDir.set(dirname(input.file), projectDialect(input.file)?.dialect);
+    const r = lintSql(input.sql, {
+      dialect: opts.dialect, projectDialect: input.file ? dialectOfDir.get(dirname(input.file)) : undefined, profile,
+      schema: input.file ? schemaOf(input.file) : cloneSchema(seed), createdBefore,
+      generated: !input.file, noTransaction: input.file ? flywayNoTransaction(input.file) : false,
+    });
+    if (!input.file && r.statements === 0) throw new UsageError('stdin held no SQL statements, so nothing was checked');
+    if (input.file && fresh.has(input.file)) r.createdTables.forEach((t) => createdBefore.add(t));
+    findings.push(...r.findings.map((f) => ({ ...f, file: input.label })));
+    if (profile.downs && input.file && !r.hasDownSection && !r.markers.rollback && !r.irreversible && !hasDownSibling(input.file))
+      findings.push({ level: WARN, rule: 'missing-down', file: input.label, line: 1, message: 'no way back: add a down (x.down.sql, down.sql, a Down section) that runs, or declare `-- migration-lint: irreversible -- <recovery plan>`' });
+  }
+
+  const errors = findings.filter((f) => f.level === ERROR).length;
+  return {
+    files: inputs.length, errors, warnings: findings.length - errors, findings, notes,
+    history: history ? { base: history.base.label, mergeBase: history.base.mergeBase, tip: history.base.tip } : null,
+  };
+};
+
+export { HistoryError };
