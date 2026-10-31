@@ -24,7 +24,7 @@ const fakeDocker = (t, body) => {
   const dir = scratch(t);
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, 'docker-fake.mjs'), `const args = process.argv.slice(2);\n${body}\n`);
-  writeFileSync(join(dir, 'docker'), `#!/bin/sh\nexec "${process.execPath}" "$(dirname "$0")/docker-fake.mjs" "$@"\n`);
+  writeFileSync(join(dir, 'docker'), `#!/bin/sh\nexec "${process.execPath}" "${join(dir, 'docker-fake.mjs')}" "$@"\n`);
   chmodSync(join(dir, 'docker'), 0o755);
   return dir;
 };
