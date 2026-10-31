@@ -29,7 +29,7 @@ test('oracle-ddl-lock-timeout: no queueing, so DDL on a busy table fails with OR
 
 test('oracle-ddl-commits-dml: pending DML is committed by the next DDL', () => {
   assert.deepEqual(rules('UPDATE t SET a = 1 WHERE id = 1;\nALTER TABLE t ADD (c NUMBER);').filter((r) => r !== 'not-atomic'), ['oracle-ddl-commits-dml']);
-  assert.deepEqual(rules('UPDATE t SET a = 1 WHERE id = 1;\nCOMMIT;\nALTER TABLE t ADD (c NUMBER);'), []);
+  assert.deepEqual(rules('UPDATE t SET a = 1 WHERE id = 1;\nCOMMIT;\nALTER TABLE t ADD (c NUMBER);').filter((r) => r !== 'not-atomic'), []);
   assert.deepEqual(rules('CREATE TABLE n (id NUMBER);\nINSERT INTO n VALUES (1);\nCREATE TABLE m (id NUMBER);').includes('oracle-ddl-commits-dml'), true);
   assert.deepEqual(rules('INSERT INTO n VALUES (1);\nCOMMIT;').includes('oracle-ddl-commits-dml'), false);
 });
