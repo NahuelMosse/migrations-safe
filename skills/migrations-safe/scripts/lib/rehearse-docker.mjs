@@ -113,10 +113,11 @@ const startPoller = (eng, c) => {
   let rows = [];
   let buf = '';
   let errText = '';
-  const state = { stopped: false, died: false, error: null };
+  const state = { stopped: false, died: false, error: null, tail: '' };
   child.stdin.on('error', () => {});
   child.stderr.setEncoding('utf8').on('data', (d) => { errText += d; state.error = firstLines(errText, 2) || null; });
   child.stdout.setEncoding('utf8').on('data', (d) => {
+    state.tail = `${state.tail}${d}`.slice(-400);
     buf += d;
     let i;
     while ((i = buf.indexOf('\n')) !== -1) {
@@ -340,7 +341,7 @@ export const rehearseDocker = async (opts, print) => {
       pendingSeen = (await eng.pending(name)).includes(eng.pendingProbe.table);
     }
     await docker(eng.scriptArgs(name, { app: SEED_APP, stopOnError: true, wrap: false }), { input: eng.probe.drop });
-    if (!seen) throw new RehearsalUsageError(`lock measurement failed its self-test: a lock held on a probe table was not seen by the polling session (${poller.state.error ?? setupError ?? (poller.state.died ? 'the polling session ended' : 'no row returned')}); nothing was measured, so nothing is reported`);
+    if (!seen) throw new RehearsalUsageError(`lock measurement failed its self-test: a lock held on a probe table was not seen by the polling session (${poller.state.error ?? setupError ?? (poller.state.died ? 'the polling session ended' : `no row returned in ${poller.samples.length} poll(s); the session's last output: ${poller.state.tail.replace(/\s+/g, ' ').trim().slice(-160) || 'none'}`)}); nothing was measured, so nothing is reported`);
     if (!pendingSeen) throw new RehearsalUsageError('REORG-pending detection failed its self-test: a DROP COLUMN on a probe table was not reported as REORG pending; migrations that leave a table unusable would pass unnoticed, so nothing is reported');
     let pendingNow = new Set();
 
