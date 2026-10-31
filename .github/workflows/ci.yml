@@ -163,27 +163,12 @@ jobs:
           node-version: '24'
       - name: Pull the engine
         run: docker pull icr.io/db2_community/db2:11.5.9.0
-      - name: Db2 starts on the default network and on a private one (shows where it stops when it does not)
+      - name: Rehearse the seed on Db2
         run: |
-          IMG=icr.io/db2_community/db2:11.5.9.0
-          wait_ready() {
-            for i in $(seq 1 60); do
-              docker logs "$1" 2>&1 | grep -q "Setup has completed" && return 0
-              sleep 10
-            done
-            echo "$1 did not finish its setup in 10 minutes; last log lines and processes:"
-            docker logs --tail 12 "$1" 2>&1 | cut -c1-160
-            docker exec "$1" sh -c 'for p in /proc/[0-9]*; do c=$(tr "\0" " " < $p/cmdline 2>/dev/null | cut -c1-100); [ -n "$c" ] && echo "$(basename $p) $(cat $p/wchan 2>/dev/null) $c"; done | head -15' || true
-            return 1
-          }
-          docker run -d --name db2diag-default --privileged -e LICENSE=accept -e DB2INST1_PASSWORD=Msafe_Rehearsal1 -e DBNAME=REHEARSE -e ARCHIVE_LOGS=false -e AUTOCONFIG=false $IMG
-          code=0; wait_ready db2diag-default || code=1
-          docker rm -f -v db2diag-default
-          docker network create --internal db2diag-net
-          docker run -d --name db2diag-internal --network db2diag-net --privileged -e LICENSE=accept -e DB2INST1_PASSWORD=Msafe_Rehearsal1 -e DBNAME=REHEARSE -e ARCHIVE_LOGS=false -e AUTOCONFIG=false $IMG
-          wait_ready db2diag-internal || code=1
-          docker rm -f -v db2diag-internal; docker network rm db2diag-net
-          exit $code
+          S=skills/migrations-safe
+          printf 'ALTER TABLE orders ADD COLUMN due_on DATE;\n' > /tmp/db2-add.sql
+          printf "ALTER TABLE orders DROP COLUMN note;\nCALL SYSPROC.ADMIN_CMD('REORG TABLE orders');\n" > /tmp/db2-drop.sql
+          node $S/scripts/rehearse.mjs --engine db2:11.5.9.0 --allow-loss orders.note $S/fixtures/seed-db2.sql /tmp/db2-add.sql /tmp/db2-drop.sql
       - name: Db2 rehearsal tests
         run: node --test test/rehearse-docker.test.mjs
       - name: No rehearsal container or network is left behind
