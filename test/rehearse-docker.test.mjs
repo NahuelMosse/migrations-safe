@@ -37,7 +37,7 @@ test('--engine and --lock-budget values are parsed and validated', () => {
   assert.deepEqual(parseEngine('postgres:16'), { kind: 'postgres', tag: '16', image: 'postgres:16' });
   assert.equal(parseEngine('mariadb:11.4').image, 'mariadb:11.4');
   assert.equal(parseEngine('mysql:8.4').kind, 'mysql');
-  for (const bad of ['postgres', 'oracle:19', 'mysql:', '']) assert.throws(() => parseEngine(bad), /--engine takes/);
+  for (const bad of ['postgres', 'nosuch:1', 'mysql:', '']) assert.throws(() => parseEngine(bad), /--engine takes/);
   assert.equal(parseDuration('2'), 2000);
   assert.equal(parseDuration('2s'), 2000);
   assert.equal(parseDuration('500ms'), 500);
@@ -55,7 +55,7 @@ test('server-engine arguments are validated before docker is touched: exit 2', (
   const dir = scratch(t);
   const up = put(dir, '0001.sql', 'SELECT 1;\n');
   const noDocker = { env: onlyPath(scratch(t)) };
-  assert.equal(cli(['--engine', 'oracle:19', PG_SEED, up], noDocker).code, 2);
+  assert.equal(cli(['--engine', 'nosuch:1', PG_SEED, up], noDocker).code, 2);
   assert.equal(cli(['--engine', 'postgres:16', PG_SEED], noDocker).code, 2);
   assert.equal(cli(['--engine', 'postgres:16', PG_SEED, join(dir, 'missing.sql')], noDocker).code, 2);
   assert.equal(cli(['--engine', 'postgres:16', PG_SEED, up, '--lock-budget', 'soon'], noDocker).code, 2);
@@ -151,6 +151,47 @@ test('error descriptions carry a position or code, never the text of the error',
   assert.equal(my.describeError("ERROR 1062 (23000) at line 7: Duplicate entry 'a@b.c' for key 'u'"), 'ERROR 1062 (23000) at line 7');
 });
 
+test('SQL Server: --edition picks MSSQL_PID, Express stops at 10 GB, errors are described by number and line', () => {
+  const run = (tag, edition) => makeEngine({ kind: 'mssql', tag, image: `mcr.microsoft.com/mssql/server:${tag}` }, { edition }).runArgs({});
+  assert.ok(run('2022-latest', 'standard').includes('MSSQL_PID=Express'));
+  assert.ok(run('2019-latest', undefined).includes('MSSQL_PID=Express'));
+  assert.ok(run('2025-latest', 'standard').includes('MSSQL_PID=StandardDeveloper'));
+  assert.ok(run('2022-latest', 'enterprise').includes('MSSQL_PID=Developer'));
+  assert.ok(!run('2022-latest', 'standard').join(' ').includes('--tmpfs'), 'SQL Server needs O_DIRECT: no tmpfs');
+  const big = 11 * 1024 ** 3;
+  assert.throws(() => makeEngine({ kind: 'mssql', tag: '2022-latest', image: 'x' }, { edition: 'standard' }).checkSeed(big), /stops at 10 GB per database/);
+  makeEngine({ kind: 'mssql', tag: '2022-latest', image: 'x' }, { edition: 'enterprise' }).checkSeed(big);
+  makeEngine({ kind: 'mssql', tag: '2025-latest', image: 'x' }, { edition: 'standard' }).checkSeed(big);
+  const ms = makeEngine({ kind: 'mssql', tag: '2022-latest', image: 'x' });
+  assert.equal(ms.describeError("Msg 2714, Level 16, State 6, Server 5fe6, Line 3\nThere is already an object named 'x'"), 'Msg 2714 at line 3');
+  assert.deepEqual(ms.errorLines('Msg 4902, Level 16, State 1, Server s, Line 1\nCannot find the object "t" containing 5 rows'), ['Msg 4902, Level 16, State 1, Server s, Line 1']);
+  assert.match(ms.pollInput(), /dm_tran_locks[^]*'Sch-M', 'X', 'SIX', 'S'[^]*@@END/);
+  assert.match(ms.probe.hold, /TABLOCKX, HOLDLOCK[^]*WAITFOR DELAY '00:00:03'/);
+});
+
+test('SQL Server scripts are sent with GO batches, marks inside the server and a transaction only when the runner wraps', () => {
+  const ms = makeEngine({ kind: 'mssql', tag: '2022-latest', image: 'x' });
+  const plain = ms.scriptInput('ALTER TABLE t ADD c int;', { wrap: false, marks: true });
+  assert.ok(plain.marked);
+  assert.match(plain.input, /^SET NOCOUNT ON;\nSELECT CONCAT\('@@T0 '[^]*ALTER TABLE t ADD c int;\nGO\nSELECT CONCAT\('@@T1 '/);
+  assert.ok(!/BEGIN TRANSACTION/.test(plain.input));
+  const wrapped = ms.scriptInput('ALTER TABLE t ADD c int;', { wrap: true, marks: true }).input;
+  assert.match(wrapped, /SET XACT_ABORT ON;\nBEGIN TRANSACTION;\nGO\n[^]*COMMIT TRANSACTION;\nGO\n$/);
+  assert.ok(ms.base('c').includes('127.0.0.1'), 'a container with no network has no ::1');
+});
+
+test('--edition is validated per engine before docker is touched: exit 2', (t) => {
+  const up = put(scratch(t), '0001.sql', 'SELECT 1;\n');
+  const noDocker = { env: onlyPath(scratch(t)) };
+  for (const args of [['--engine', 'postgres:16', '--edition', 'standard'], ['--engine', 'mssql:2022-latest', '--edition', 'se2'], ['--engine', 'oracle:23', '--edition', 'standard'], ['--engine', 'sqlite', '--edition', 'standard']]) {
+    const r = cli([...args, PG_SEED, up], noDocker);
+    assert.equal(r.code, 2, args.join(' '));
+    assert.match(r.err, /--edition/);
+  }
+  const ok = cli(['--engine', 'mssql:2022-latest', '--edition', 'enterprise', PG_SEED, up], noDocker);
+  assert.match(ok.err, /docker is not available/);
+});
+
 // A fake docker is an executable script: Node cannot spawn .cmd files on Windows.
 const FAKE_SKIP = process.platform === 'win32' ? 'skipped: a fake docker command needs a POSIX shell' : false;
 
@@ -200,26 +241,59 @@ const containerOf = (out) => out.match(/in container (msafe-rehearse-[\w-]+)/)?.
 const exists = (name) => spawnSync('docker', ['inspect', name], { stdio: 'ignore', windowsHide: true }).status === 0;
 const remove = (name) => spawnSync('docker', ['rm', '-f', '-v', name], { stdio: 'ignore', windowsHide: true });
 
-for (const engine of ENGINES) {
-  const pg = engine.startsWith('postgres');
-  const seed = pg ? PG_SEED : MY_SEED;
-  const label = engine;
 
-  test(`${label}: ups report diffs and locks, a lock over the budget and a lossy migration fail, the container is removed`, { skip, timeout: 900000 }, (t) => {
+// What each engine family needs: a seed, the statements the shared scenarios run, and what they must print.
+const SCENARIOS = {
+  postgres: {
+    seed: PG_SEED, add: 'ALTER TABLE orders ADD COLUMN due_on date;\n',
+    lock: 'BEGIN;\nLOCK TABLE orders IN ACCESS EXCLUSIVE MODE;\nSELECT pg_sleep(1.5);\nCOMMIT;\n', lockRe: /lock: AccessExclusiveLock on orders held ~1\.\d\d s \(\d+ poll\(s\)\), over the 0\.5 s budget/,
+    drop: 'ALTER TABLE orders DROP COLUMN note;\n',
+    dump: `SET statement_timeout = 0;\nCREATE TABLE users (id integer PRIMARY KEY, email text NOT NULL);\nALTER TABLE users OWNER TO no_such_role;\nCOPY users (id, email) FROM stdin;\n1\ta@example.com\n2\tb@example.com\n\\.\n`,
+    dumpError: /at line 3\n/,
+    up: '-- +goose Up\nALTER TABLE users ADD COLUMN nickname text;\nUPDATE users SET nickname = split_part(email, \'@\', 1);\n-- +goose Down\nALTER TABLE users DROP COLUMN nickname;\n', runner: /goose|dbmate/,
+    bad: 'ALTER TABLE no_such_table ADD COLUMN x int;\n', after: 'ALTER TABLE users ADD COLUMN y int;\n',
+  },
+  mysql: {
+    seed: MY_SEED, add: 'ALTER TABLE orders ADD COLUMN due_on date NULL;\n',
+    lock: 'LOCK TABLES orders WRITE;\nSELECT SLEEP(1.5);\nUNLOCK TABLES;\n', lockRe: /lock: SHARED_NO_READ_WRITE on orders held ~1\.\d\d s .*over the 0\.5 s budget/,
+    drop: 'ALTER TABLE orders DROP COLUMN note;\n',
+    dump: "/*!40101 SET NAMES utf8mb4 */;\nCREATE TABLE `users` (`id` int NOT NULL PRIMARY KEY, `email` varchar(100) NOT NULL) ENGINE=InnoDB;\nALTER TABLE `missing_table` ADD COLUMN x int;\nLOCK TABLES `users` WRITE;\nINSERT INTO `users` VALUES (1,'a@example.com'),(2,'b@example.com');\nUNLOCK TABLES;\n",
+    dumpError: /ERROR 1146 \(42S02\) at line 3\n/,
+    up: "-- migrate:up\nALTER TABLE users ADD COLUMN nickname varchar(50) NULL;\nUPDATE users SET nickname = SUBSTRING_INDEX(email, '@', 1);\n-- migrate:down\nALTER TABLE users DROP COLUMN nickname;\n", runner: /goose|dbmate/,
+    extra: [['0002_proc.sql', '-- +goose Up\n-- +goose StatementBegin\nCREATE PROCEDURE msafe_touch() BEGIN SELECT 1; SELECT 2; END\n-- +goose StatementEnd\n-- +goose Down\nDROP PROCEDURE msafe_touch;\n']],
+    bad: 'ALTER TABLE no_such_table ADD COLUMN x int;\n', after: 'ALTER TABLE users ADD COLUMN y int;\n',
+  },
+  mssql: {
+    seed: join(FIXTURES, 'seed-mssql.sql'), add: 'ALTER TABLE orders ADD due_on date NULL;\n',
+    lock: "BEGIN TRANSACTION;\nSELECT 1 FROM orders WITH (TABLOCKX, HOLDLOCK);\nWAITFOR DELAY '00:00:01.5';\nCOMMIT TRANSACTION;\n", lockRe: /lock: X on orders held ~1\.\d\d s \(\d+ poll\(s\)\), over the 0\.5 s budget/,
+    drop: 'ALTER TABLE orders DROP COLUMN note;\n',
+    dump: 'CREATE TABLE users (id int PRIMARY KEY, email nvarchar(100) NOT NULL);\nGO\nALTER TABLE missing_table ADD x int;\nGO\nINSERT INTO users VALUES (1, N\'a@example.com\'), (2, N\'b@example.com\');\nGO\n',
+    dumpError: /Msg 4902 at line 1\n/,
+    up: "-- migrate:up\nALTER TABLE users ADD nickname nvarchar(50) NULL;\nGO\nUPDATE users SET nickname = LEFT(email, CHARINDEX('@', email) - 1);\n-- migrate:down\nALTER TABLE users DROP COLUMN nickname;\n", runner: /goose|dbmate/,
+    bad: 'ALTER TABLE no_such_table ADD x int;\n', after: 'ALTER TABLE users ADD y int;\n',
+  },
+};
+const familyOf = (engine) => ({ mariadb: 'mysql' }[engine.split(':')[0]] ?? engine.split(':')[0]);
+
+for (const engine of ENGINES) {
+  const family = familyOf(engine);
+  const sc = SCENARIOS[family];
+  const label = engine;
+  if (!sc) continue;
+
+  test(`${label}: ups report diffs and locks, a lock over the budget and a lossy migration fail, the container is removed`, { skip, timeout: 1500000 }, (t) => {
     const dir = scratch(t);
-    const add = put(dir, '0001_add.sql', pg ? 'ALTER TABLE orders ADD COLUMN due_on date;\n' : 'ALTER TABLE orders ADD COLUMN due_on date NULL;\n');
-    const lock = put(dir, '0002_lock.sql', pg
-      ? 'BEGIN;\nLOCK TABLE orders IN ACCESS EXCLUSIVE MODE;\nSELECT pg_sleep(1.5);\nCOMMIT;\n'
-      : 'LOCK TABLES orders WRITE;\nSELECT SLEEP(1.5);\nUNLOCK TABLES;\n');
-    const drop = put(dir, '0003_drop.sql', 'ALTER TABLE orders DROP COLUMN note;\n');
-    const r = cli(['--engine', engine, seed, add, lock, drop, '--lock-budget', '0.5']);
+    const add = put(dir, '0001_add.sql', sc.add);
+    const lock = put(dir, '0002_lock.sql', sc.lock);
+    const drop = put(dir, '0003_drop.sql', sc.drop);
+    const r = cli(['--engine', engine, sc.seed, add, lock, drop, '--lock-budget', '0.5']);
     t.after(() => { const n = containerOf(r.out); if (n) remove(n); });
     assert.equal(r.code, 1, r.out + r.err);
-    assert.match(r.out, new RegExp(`engine ${engine} in container msafe-rehearse-`));
+    assert.match(r.out, new RegExp(`engine .*${engine.split(':')[1].replace(/\W/g, '.')} in container msafe-rehearse-`));
     assert.match(r.out, /seed: .* loaded in .* \(2 table\(s\), 7 row\(s\)\)/);
     assert.match(r.out, /ran\s+up\s.*0001_add\.sql in \d+ ms\n\s+orders\s+rows 4\s+columns: \+due_on\n\s+users\s+rows 3/);
     assert.match(r.out, /LOCKED\s+up\s.*0002_lock\.sql/);
-    assert.match(r.out, pg ? /lock: AccessExclusiveLock on orders held ~1\.\d\d s \(\d+ poll\(s\)\), over the 0\.5 s budget/ : /lock: SHARED_NO_READ_WRITE on orders held ~1\.\d\d s .*over the 0\.5 s budget/);
+    assert.match(r.out, sc.lockRe);
     assert.match(r.out, /LOST\s+up\s.*0003_drop\.sql/);
     assert.match(r.out, /lost: orders\.note dropped with 2 non-NULL value\(s\)/);
     assert.match(r.out, /3 up\(s\) on .*: 2 problem\(s\)/);
@@ -232,42 +306,57 @@ for (const engine of ENGINES) {
     assert.ok(!exists(name), `${name} must be removed`);
   });
 
-  test(`${label}: --dump loads tolerating errors; --down runs up, down, up; a lock inside the budget passes`, { skip, timeout: 900000 }, (t) => {
+  test(`${label}: --dump loads tolerating errors; --down runs up, down, up; a lock inside the budget passes`, { skip, timeout: 1500000 }, (t) => {
     const dir = scratch(t);
-    const dump = put(dir, 'dump.sql', pg
-      ? `SET statement_timeout = 0;\nCREATE TABLE users (id integer PRIMARY KEY, email text NOT NULL);\nALTER TABLE users OWNER TO no_such_role;\nCOPY users (id, email) FROM stdin;\n1\ta@example.com\n2\tb@example.com\n\\.\n`
-      : "/*!40101 SET NAMES utf8mb4 */;\nCREATE TABLE `users` (`id` int NOT NULL PRIMARY KEY, `email` varchar(100) NOT NULL) ENGINE=InnoDB;\nALTER TABLE `missing_table` ADD COLUMN x int;\nLOCK TABLES `users` WRITE;\nINSERT INTO `users` VALUES (1,'a@example.com'),(2,'b@example.com');\nUNLOCK TABLES;\n");
-    const up = pg
-      ? put(dir, '0001_nick.sql', '-- +goose Up\nALTER TABLE users ADD COLUMN nickname text;\nUPDATE users SET nickname = split_part(email, \'@\', 1);\n-- +goose Down\nALTER TABLE users DROP COLUMN nickname;\n')
-      : put(dir, '0001_nick.sql', "-- migrate:up\nALTER TABLE users ADD COLUMN nickname varchar(50) NULL;\nUPDATE users SET nickname = SUBSTRING_INDEX(email, '@', 1);\n-- migrate:down\nALTER TABLE users DROP COLUMN nickname;\n");
-    // a stored procedure keeps its inner semicolons (goose StatementBegin/End) on MySQL and MariaDB
-    const proc = pg ? [] : [put(dir, '0002_proc.sql', '-- +goose Up\n-- +goose StatementBegin\nCREATE PROCEDURE msafe_touch() BEGIN SELECT 1; SELECT 2; END\n-- +goose StatementEnd\n-- +goose Down\nDROP PROCEDURE msafe_touch;\n')];
-    const r = cli(['--engine', engine, '--dump', dump, up, ...proc, '--down']);
+    const dump = put(dir, 'dump.sql', sc.dump);
+    const up = put(dir, '0001_nick.sql', sc.up);
+    const extra = (sc.extra ?? []).map(([n, body]) => put(dir, n, body));
+    const r = cli(['--engine', engine, '--dump', dump, up, ...extra, '--down']);
     t.after(() => { const n = containerOf(r.out); if (n) remove(n); });
     assert.equal(r.code, 0, r.out + r.err);
     assert.match(r.out, /runner: (goose|dbmate)/);
-    assert.match(r.out, /seed: the dump loaded with 1 error line\(s\), first (at line 3|ERROR 1146 \(42S02\) at line 3)\n/);
+    assert.match(r.out, new RegExp(`seed: the dump loaded with 1 error line\\(s\\), first ${sc.dumpError.source}`));
     assert.ok(!/no_such_role|missing_table/.test(r.out), 'the text of a dump error can quote data and is not printed');
-    if (!pg) assert.match(r.out, /ran\s+up\s.*0002_proc\.sql/);
+    if (extra.length) assert.match(r.out, /ran\s+up\s.*0002_proc\.sql/);
     assert.match(r.out, /\(1 table\(s\), 2 row\(s\)\)/);
     assert.match(r.out, /ran\s+up\s[^]*?columns: \+nickname/);
     assert.match(r.out, /ran\s+down\s[^]*?columns: -nickname \(2 non-NULL\)/);
     assert.match(r.out, /after the down\(s\) the tables and columns match the seed/);
-    assert.match(r.out, new RegExp(`${pg ? 1 : 2} up\\(s\\), ${pg ? 1 : 2} down\\(s\\) on .*all ran, no rows or values lost, no write lock over 2 s`));
+    const n = 1 + extra.length;
+    assert.match(r.out, new RegExp(`${n} up\\(s\\), ${n} down\\(s\\) on .*all ran, no rows or values lost, no write lock over 2 s`));
     assert.ok(!exists(containerOf(r.out)));
   });
 
-  test(`${label}: a failing migration stops the rest and the container is still removed`, { skip, timeout: 900000 }, (t) => {
+  test(`${label}: a failing migration stops the rest and the container is still removed`, { skip, timeout: 1500000 }, (t) => {
     const dir = scratch(t);
-    const bad = put(dir, '0001_bad.sql', 'ALTER TABLE no_such_table ADD COLUMN x int;\n');
-    const after = put(dir, '0002_after.sql', 'ALTER TABLE users ADD COLUMN y int;\n');
-    const r = cli(['--engine', engine, seed, bad, after]);
+    const bad = put(dir, '0001_bad.sql', sc.bad);
+    const after = put(dir, '0002_after.sql', sc.after);
+    const r = cli(['--engine', engine, sc.seed, bad, after]);
     t.after(() => { const n = containerOf(r.out); if (n) remove(n); });
     assert.equal(r.code, 1, r.out + r.err);
-    assert.match(r.out, /FAILED\s+up\s.*0001_bad\.sql: .*no_such_table/);
+    assert.match(r.out, /FAILED\s+up\s.*0001_bad\.sql: .*no_such_table/i);
     assert.match(r.out, /SKIPPED up\s.*0002_after/);
     assert.ok(!/ran\s+up/.test(r.out));
     assert.ok(!exists(containerOf(r.out)));
+  });
+}
+
+const msEngine = ENGINES.find((e) => e.startsWith('mssql:'));
+if (msEngine) {
+  test(`${msEngine}: --edition standard runs a non-Enterprise edition (ONLINE fails), --edition enterprise runs Developer (ONLINE works)`, { skip, timeout: 2400000 }, (t) => {
+    const dir = scratch(t);
+    const online = put(dir, '0001_idx.sql', 'CREATE INDEX ix_orders_note ON orders (user_id) WITH (ONLINE = ON);\n');
+    const std = cli(['--engine', msEngine, SCENARIOS.mssql.seed, online]);
+    t.after(() => { const n = containerOf(std.out); if (n) remove(n); });
+    assert.equal(std.code, 1, std.out + std.err);
+    assert.match(std.out, /edition: (Express|Standard)/);
+    assert.match(std.out, /FAILED\s+up\s.*0001_idx\.sql/);
+    const ent = cli(['--engine', msEngine, '--edition', 'enterprise', SCENARIOS.mssql.seed, online]);
+    t.after(() => { const n = containerOf(ent.out); if (n) remove(n); });
+    assert.equal(ent.code, 0, ent.out + ent.err);
+    assert.match(ent.out, /edition: Developer/);
+    assert.match(ent.out, /ran\s+up\s.*0001_idx\.sql/);
+    assert.ok(!exists(containerOf(std.out)) && !exists(containerOf(ent.out)));
   });
 }
 

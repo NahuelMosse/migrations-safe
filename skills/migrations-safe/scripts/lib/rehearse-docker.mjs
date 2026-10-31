@@ -9,11 +9,11 @@ import { createGunzip, gunzipSync } from 'node:zlib';
 import { decodeSql, parse } from './parse.mjs';
 import { RUNNER_IDS, detectRunner, profileOf, wrapsFile } from './runners.mjs';
 import { RehearsalUsageError, diff, partFor } from './rehearse.mjs';
-import { makeEngine, mysqlInput } from './engines/index.mjs';
+import { IMAGES, makeEngine, mysqlInput } from './engines/index.mjs';
 import { MIGRATION_APP, PROBE_TABLE, SEED_APP, docker, firstLines } from './engines/shared.mjs';
 
 export { makeEngine, mysqlInput };
-export const ENGINE_KINDS = ['postgres', 'mysql', 'mariadb'];
+export const ENGINE_KINDS = Object.keys(IMAGES);
 export const DEFAULT_LOCK_BUDGET_MS = 2000;
 export const SIGNAL_EXIT = { SIGHUP: 129, SIGINT: 130, SIGTERM: 143 };
 const POLL_PAUSE_MS = 40;
@@ -22,8 +22,8 @@ const TMPFS_SEED_LIMIT = 256 * 1024 * 1024;
 export const parseEngine = (spec) => {
   const [kind, ...rest] = String(spec).split(':');
   const tag = rest.join(':');
-  if (!ENGINE_KINDS.includes(kind) || !tag) throw new RehearsalUsageError(`--engine takes sqlite, postgres:<tag>, mysql:<tag> or mariadb:<tag> (got "${String(spec).slice(0, 40)}")`);
-  return { kind, tag, image: `${kind}:${tag}` };
+  if (!ENGINE_KINDS.includes(kind) || !tag) throw new RehearsalUsageError(`--engine takes sqlite, postgres:<tag>, mysql:<tag>, mariadb:<tag>, mssql:<tag>, oracle:<tag> or db2:<tag> (got "${String(spec).slice(0, 40)}")`);
+  return { kind, tag, image: `${IMAGES[kind]}:${tag}` };
 };
 
 // "2" and "2s" are seconds, "500ms" milliseconds.
@@ -107,13 +107,13 @@ const startPoller = (eng, c) => {
     buf += d;
     let i;
     while ((i = buf.indexOf('\n')) !== -1) {
-      const line = buf.slice(0, i).replace(/\r$/, '');
+      const line = buf.slice(0, i).replace(/\r$/, '').trimEnd();
       buf = buf.slice(i + 1);
       if (line === '@@END') {
         samples.push({ t: performance.now(), rows });
         rows = [];
         setTimeout(send, POLL_PAUSE_MS);
-      } else if (line) rows.push(line.split('\t'));
+      } else if (line) rows.push(line.split('\t').map((f) => f.trimEnd()));
     }
   });
   child.on('close', () => { if (!state.stopped) state.died = true; });
@@ -164,14 +164,14 @@ const run = async (args, input, what) => {
 const snapshotOf = async (eng, c) => {
   const meta = await run(eng.queryArgs(c), eng.metaSql, 'reading the schema');
   const tables = new Map();
-  for (const [schema, table, name, type] of rows(meta).map((l) => l.split('\t'))) {
+  for (const [schema, table, name, type] of rows(meta).map((l) => l.split('\t').map((f) => f.trimEnd()))) {
     const key = eng.tableKey(schema, table);
     if (!tables.has(key)) tables.set(key, { schema, name: table, cols: [] });
     tables.get(key).cols.push({ name, type });
   }
   const stats = new Map();
   if (tables.size) {
-    const out = await run(eng.queryArgs(c), [...tables].map(([key, t]) => eng.statsSql(key, t, t.cols)).join('\n'), 'counting rows');
+    const out = await run(eng.queryArgs(c), (eng.q ?? ((s) => s))([...tables].map(([key, t]) => eng.statsSql(key, t, t.cols)).join('\n')), 'counting rows');
     for (const line of rows(out)) { try { const o = JSON.parse(line); stats.set(o.t, o); } catch { /* not a result row */ } }
   }
   const snap = new Map();
@@ -246,7 +246,8 @@ export const rehearseDocker = async (opts, print) => {
   if (!source || !ups.length) throw new RehearsalUsageError('a seed (or --dump file) and at least one migration are needed');
   if (opts.runner && !RUNNER_IDS.includes(opts.runner)) throw new RehearsalUsageError(`unknown runner ${opts.runner}`);
   for (const f of [source, ...ups, ...(Array.isArray(downs) ? downs : [])]) if (!existsSync(f)) throw new RehearsalUsageError(`${f} does not exist`);
-  const eng = makeEngine(spec);
+  const eng = makeEngine(spec, { edition: opts.edition });
+  eng.checkSeed?.(seedBytes(source));
   const downFiles = downs === 'sections' ? ups : downs;
   if (downs === 'sections') for (const f of ups) if (!partFor(f, 'down', eng.dialect).hasDown) throw new RehearsalUsageError(`${f} has no down section: pass the down files after --down`);
   for (const f of ups) if (statementCount(f, 'up', eng.dialect) === 0) throw new RehearsalUsageError(`${f} has no SQL statements, so there is nothing to rehearse`);
@@ -273,8 +274,12 @@ export const rehearseDocker = async (opts, print) => {
     const started = await docker(['run', '-d', '--name', name, '--label', 'msafe-rehearse=1', '--network', 'none', ...eng.runArgs({ tmpfs })], { timeoutMs: 120000 });
     if (started.code !== 0) throw new RehearsalUsageError(`could not start ${spec.image}: ${firstLines(started.err, 2)}`);
     print(`runner: ${profile.label} (${detected.evidence}) · engine ${spec.image} in container ${name}`);
-    await waitReady(eng, name, opts.startupTimeoutMs ?? 240000);
+    await waitReady(eng, name, opts.startupTimeoutMs ?? eng.startupMs ?? 240000);
     const setupError = await eng.setup(name);
+    const verified = await eng.verify?.(name);
+    if (verified?.error) throw new RehearsalUsageError(verified.error);
+    if (verified?.note) print(verified.note);
+    if (eng.editionNote) print(eng.editionNote);
     const t0 = performance.now();
     await loadSeed(eng, name, source, opts.dump === true, print);
     let current = await snapshotOf(eng, name);
@@ -316,7 +321,7 @@ export const rehearseDocker = async (opts, print) => {
       if (r.code !== 0) {
         failed++;
         print(`FAILED  ${kind.padEnd(4)} ${file}: ${firstLines(r.err || r.out, 3)}`);
-        if (eng.dialect === 'mysql' && !wrap) print('          statements before the failing one stay applied: MySQL DDL commits implicitly');
+        if (eng.implicitCommit && !wrap) print(`          statements before the failing one stay applied: ${eng.label} DDL commits implicitly`);
         return false;
       }
       // duration measured inside the server, between two marks of the same session

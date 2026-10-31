@@ -24,7 +24,7 @@ export const mysqlInput = (sql, { wrap, marks }) => {
 export const makeMysql = ({ kind, image }) => {
   const maria = kind === 'mariadb';
   const eng = {
-    kind, image, label: maria ? 'MariaDB' : 'MySQL', dialect: 'mysql', bin: 'mysql', password: PASSWORD, database: DATABASE,
+    kind, image, label: maria ? 'MariaDB' : 'MySQL', dialect: 'mysql', bin: 'mysql', password: PASSWORD, database: DATABASE, implicitCommit: true,
     runArgs: ({ tmpfs }) => [...(tmpfs ? ['--tmpfs', '/var/lib/mysql'] : []), '-e', `${maria ? 'MARIADB' : 'MYSQL'}_ROOT_PASSWORD=${PASSWORD}`, '-e', `${maria ? 'MARIADB' : 'MYSQL'}_DATABASE=${DATABASE}`, image],
     base: (c, extra = []) => ['exec', '-i', '-e', `MYSQL_PWD=${PASSWORD}`, c, eng.bin, '-h127.0.0.1', '-uroot', '--batch', '--raw', '--skip-column-names', '--default-character-set=utf8mb4', '-D', DATABASE, ...extra],
     readyArgs: (c) => eng.base(c, ['-e', 'SELECT 1']),
