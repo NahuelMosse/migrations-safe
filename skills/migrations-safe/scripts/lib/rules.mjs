@@ -6,7 +6,7 @@ import { applySchema, cloneSchema, insertTargets, parseAlter } from './schema.mj
 import { DEFAULT_MYSQL_VERSION, INDEX_STATEMENT, enumOf, learnStatement, parseMysqlVersion } from './mysql.mjs';
 import { GOT, mysqlAlterRules as mysqlRules } from './mysql-rules.mjs';
 import { DEFAULT_EDITION, DEFAULT_SERVER_VERSION, parseServerVersion } from './server-version.mjs';
-import { normalizeTsqlActions, spRename } from './mssql.mjs';
+import { learnTsql, normalizeTsqlActions, spRename } from './mssql.mjs';
 import { DROP_COLUMN_NOTE, mssqlAlterRules, mssqlIndexRules } from './mssql-rules.mjs';
 import { COMMITS, DDL_LOCK_TIMEOUT, isDdl, isDml } from './oracle.mjs';
 import { oracleAlterRules, oracleStatementRules } from './oracle-rules.mjs';
@@ -168,6 +168,8 @@ export const lintSql = (sql, ctx = {}) => {
   const enums = ctx.enums ?? new Map();
   const indexed = ctx.indexed ?? new Map();
   const defs = ctx.defs ?? new Map();
+  // SQL Server column definitions per `table.column`, kept across the files of one run
+  const tsql = ctx.tsql ?? new Map();
   const maps = { enums, indexed, defs, instantVersions };
   let fkChecksOff = false;
   const profile = ctx.profile ?? profileOf('raw');
@@ -239,7 +241,7 @@ export const lintSql = (sql, ctx = {}) => {
       }
     }
     if (ora && existing) oracleAlterRules({ add: (rule, message, extra) => add(k, rule, message, extra), table, actions, version: serverVersion, text, edition });
-    if (ms && existing) mssqlAlterRules({ add: (rule, message, extra) => add(k, rule, message, extra), table, actions, version: serverVersion, edition });
+    if (ms && existing) mssqlAlterRules({ add: (rule, message, extra) => add(k, rule, message, extra), table, actions, version: serverVersion, edition, defs: tsql });
     if (dialect === 'mysql' && !/\balgorithm\s*=/i.test(text))
       add(k, 'mysql-no-algorithm', `ALTER TABLE ${table} without ALGORITHM/LOCK may copy the table under lock: declare ALGORITHM=INSTANT (alone, it takes no LOCK clause) or ALGORITHM=INPLACE, LOCK=NONE so it fails instead; for a COPY on a big table use gh-ost`);
     for (const a of actions) {
@@ -311,6 +313,7 @@ export const lintSql = (sql, ctx = {}) => {
     const create = t.match(new RegExp(String.raw`^create (?:temp(?:orary)? |unlogged )?table (?:if not exists )?(${ident})`, 'i'));
     if (create) {
       created.add(name(create[1])); createdHere.add(name(create[1])); applySchema(tables, t);
+      if (ms) learnTsql(t, tsql);
       if (my) learnStatement(t, maps, mysqlVersion);
       return;
     }
@@ -321,6 +324,7 @@ export const lintSql = (sql, ctx = {}) => {
       if (isExisting(alter.table) && firstLock === -1) firstLock = k;
       if (alter.wait && lockTimeoutAt === -1) lockTimeoutAt = k;
       if (my && !isExisting(alter.table)) learnStatement(t, maps, mysqlVersion);
+      if (ms) learnTsql(t, tsql);
     }
     if (ms) {
       if (mssqlIndexRules({ add: (rule, message, extra) => add(k, rule, message, extra), text: t, isExisting, edition }) && firstLock === -1) firstLock = k;

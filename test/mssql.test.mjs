@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { learnTsql } from '../skills/migrations-safe/scripts/lib/mssql.mjs';
 import { parseServerVersion } from '../skills/migrations-safe/scripts/lib/server-version.mjs';
-import { findings } from './helpers.mjs';
+import { findings, lintCli, put, scratch } from './helpers.mjs';
 
 const run = (sql, { edition = 'standard', version = '2022', ...ctx } = {}) => findings(sql, {
   dialect: 'mssql', runner: 'flyway', edition, serverVersion: parseServerVersion('mssql', version), ...ctx,
@@ -85,4 +86,51 @@ test('drop-column says the space is not reclaimed until the clustered index is r
 test('an idempotent EF script keeps its ALTER visible to the rules', () => {
   const sql = "IF NOT EXISTS(SELECT * FROM [__EFMigrationsHistory] WHERE [MigrationId] = N'x')\nBEGIN\n    EXEC(N'ALTER TABLE [Orders] ADD [P] int NOT NULL DEFAULT 0');\nEND;\nGO\n";
   assert.ok(run(sql).some((f) => f.rule === 'mssql-add-not-null-default'));
+});
+
+test('mssql-alter-column: a longer varchar/nvarchar/varbinary of the same nullability and collation is metadata-only when the old definition is known', () => {
+  // the table comes from an earlier migration: a table created in the same file is new and gets no ALTER finding
+  const tsql = new Map();
+  learnTsql('CREATE TABLE t (id int, c varchar(50) NOT NULL, n nvarchar(20) NULL, b varbinary(10) NULL, k varchar(10) COLLATE Latin1_General_CI_AS NULL, p int PRIMARY KEY)', tsql);
+  const alter = (def) => rules(`ALTER TABLE t ALTER COLUMN ${def};`, { tsql: new Map(tsql) }).filter((r) => r === 'mssql-alter-column');
+  assert.deepEqual(alter('c varchar(100) NOT NULL'), []);
+  assert.deepEqual(alter('n nvarchar(200) NULL'), []);
+  assert.deepEqual(alter('n nvarchar(200)'), [], 'no NULL/NOT NULL keeps a nullable column nullable');
+  assert.deepEqual(alter('b varbinary(64)'), []);
+  assert.deepEqual(alter('c varchar(50) NOT NULL'), [], 'the same definition changes nothing');
+  assert.deepEqual(alter('k varchar(20) COLLATE Latin1_General_CI_AS NULL'), []);
+  assert.deepEqual(alter('c [varchar](100) NOT NULL'), []);
+  // not metadata-only: the finding stays, and says what changes
+  const why = (def) => run(`SET LOCK_TIMEOUT 5000;\nALTER TABLE t ALTER COLUMN ${def};`, { tsql: new Map(tsql) }).find((f) => f.rule === 'mssql-alter-column')?.message;
+  assert.match(why('c varchar(100) NULL'), /Not a metadata-only change here: nullability changes to NULL/);
+  assert.match(why('c varchar(10) NOT NULL'), /shrinks from 50 to 10/);
+  assert.match(why('c varchar(max) NOT NULL'), /LOB storage/);
+  assert.match(why('c nvarchar(100) NOT NULL'), /type changes from varchar to nvarchar/);
+  assert.match(why('c bigint NOT NULL'), /type changes from varchar to bigint/);
+  assert.match(why('k varchar(20) NULL'), /collation changes/);
+  assert.match(why('n nvarchar(200) NOT NULL'), /nullability changes to NOT NULL/);
+  assert.match(why('p int NULL'), /fixed-size type/);
+});
+
+test('mssql-alter-column: an earlier migration or --schema teaches the old definition; unknown keeps the error and says why', () => {
+  assert.match(run('SET LOCK_TIMEOUT 5000;\nALTER TABLE t ALTER COLUMN c varchar(100) NOT NULL;').find((f) => f.rule === 'mssql-alter-column').message, /previous definition of c is unknown.*--schema/);
+  const known = new Map([['t.c', { column: 'c', type: 'varchar', length: 50, nullable: false, collation: null }]]);
+  assert.deepEqual(rules('ALTER TABLE t ALTER COLUMN c varchar(100) NOT NULL;', { tsql: known }), []);
+  // a column widened in the same file is known afterwards
+  assert.deepEqual(rules('ALTER TABLE t ADD c varchar(10) NULL;\nALTER TABLE t ALTER COLUMN c varchar(20) NULL;\nALTER TABLE t ALTER COLUMN c varchar(5) NULL;', { tsql: new Map(known) }).filter((r) => r === 'mssql-alter-column'), ['mssql-alter-column']);
+});
+
+test('mssql-alter-column: the definition comes from earlier migrations of the folder and from --schema', (t) => {
+  const dir = scratch(t);
+  put(dir, 'V1__create.sql', '-- migration-lint: dialect mssql\nCREATE TABLE t (id int, c varchar(50) NOT NULL);\n');
+  put(dir, 'V2__widen.sql', '-- migration-lint: dialect mssql\nSET LOCK_TIMEOUT 5000;\nALTER TABLE t ALTER COLUMN c varchar(100) NOT NULL;\n');
+  put(dir, 'V3__shrink.sql', '-- migration-lint: dialect mssql\nSET LOCK_TIMEOUT 5000;\nALTER TABLE t ALTER COLUMN c varchar(10) NOT NULL;\n');
+  const r = JSON.parse(lintCli([dir, '--format', 'json']).out);
+  const hits = r.findings.filter((f) => f.rule === 'mssql-alter-column').map((f) => f.file.split(/[\/]/).pop());
+  assert.deepEqual(hits, ['V3__shrink.sql']);
+  const lone = scratch(t);
+  put(lone, 'V9__widen.sql', '-- migration-lint: dialect mssql\nSET LOCK_TIMEOUT 5000;\nALTER TABLE t ALTER COLUMN c varchar(100) NOT NULL;\n');
+  assert.equal(JSON.parse(lintCli([lone, '--format', 'json']).out).findings.filter((f) => f.rule === 'mssql-alter-column').length, 1);
+  const seed = put(scratch(t), 'schema.sql', 'CREATE TABLE t (id int, c varchar(50) NOT NULL);\n');
+  assert.equal(JSON.parse(lintCli([lone, '--schema', seed, '--dialect', 'mssql', '--format', 'json']).out).findings.filter((f) => f.rule === 'mssql-alter-column').length, 0);
 });

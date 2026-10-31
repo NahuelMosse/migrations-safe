@@ -7,6 +7,7 @@ import { HistoryError, historyFindings, isMigrationFile } from './history.mjs';
 import { decodeSql, flat, parse } from './parse.mjs';
 import { ERROR, WARN, lintSql } from './rules.mjs';
 import { PROFILES, RUNNER_IDS, DIALECTS, decideDialect, detectRunner, fileDialectDirective, profileOf, projectDialect, runnerFromMarkers, sniffDialect } from './runners.mjs';
+import { learnTsql } from './mssql.mjs';
 import { applySql, cloneSchema } from './schema.mjs';
 import { DEFAULT_MYSQL_VERSION, learnStatement, mysqlVersionOrThrow, parseMysqlVersion } from './mysql.mjs';
 import { DEFAULT_EDITION, DEFAULT_SERVER_VERSION, EDITIONS, editionOrThrow, parseServerVersion, projectServerVersion, serverVersionOrThrow } from './server-version.mjs';
@@ -84,7 +85,7 @@ export const loadSchemaSeed = (paths, learn = () => {}) => {
     for (const f of sqlFiles(p).filter((x) => !isDownFile(x))) {
       const sql = decodeSql(readFileSync(f));
       applySql(seed, sql, sniffDialect(sql));
-      learn(sql);
+      learn(sql, f);
     }
   }
   return seed;
@@ -158,13 +159,15 @@ export const lintTargets = (opts) => {
   };
   const versionOfDir = new Map();
   // What earlier files and --schema files taught about ENUMs, indexes, column types and instant row versions.
-  const shared = { instantVersions: new Map(), enums: new Map(), indexed: new Map(), defs: new Map(), reorgUnits: new Map() };
+  const shared = { instantVersions: new Map(), enums: new Map(), indexed: new Map(), defs: new Map(), reorgUnits: new Map(), tsql: new Map() };
   const serverNow = { v: parseMysqlVersion(opts.mysqlVersion ?? opts.serverVersion) ?? parseMysqlVersion(DEFAULT_MYSQL_VERSION) };
   const linted = new Set(); // files the rules already learned from, so replaying them would count twice
   const learn = (sql, file) => {
     if (file && linted.has(file)) return;
-    if ((fileDialectDirective(sql) ?? sniffDialect(sql)) !== 'mysql') return;
-    for (const s of parse(sql, { dialect: 'mysql' }).statements) learnStatement(flat(s.text), shared, serverNow.v);
+    const dialect = decideDialect(sql, { dialect: opts.dialect, project: file ? projectDialect(file) : undefined }).dialect;
+    if (dialect === 'mssql') { for (const s of parse(sql, { dialect }).statements) learnTsql(flat(s.text), shared.tsql); return; }
+    if (dialect !== 'mysql') return;
+    for (const s of parse(sql, { dialect }).statements) learnStatement(flat(s.text), shared, serverNow.v);
   };
   const seed = loadSchemaSeed(opts.schema ?? [], learn);
   const schemaOf = createSchemaSource(seed, learn);

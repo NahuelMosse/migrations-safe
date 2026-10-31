@@ -2,7 +2,7 @@
 import { name, stripLiterals } from './parse.mjs';
 import { versionAtLeast } from './server-version.mjs';
 import {
-  ALTER_INDEX, CREATE_INDEX, ONLINE_ALTER_COLUMN_YEAR, ONLINE_ON, RESUMABLE_ON, defaultOf, isEnterprise,
+  ALTER_INDEX, CREATE_INDEX, ONLINE_ALTER_COLUMN_YEAR, ONLINE_ON, RESUMABLE_ON, defaultOf, isEnterprise, tsqlColumn, widenOnlyProblem,
 } from './mssql.mjs';
 
 const WARN = 'warning';
@@ -19,7 +19,7 @@ const onlineEdition = ({ add, text, edition }) => {
 };
 
 // Rules for one ALTER TABLE on an existing table; `actions` come from normalizeTsqlActions.
-export const mssqlAlterRules = ({ add, table, actions, version, edition }) => {
+export const mssqlAlterRules = ({ add, table, actions, version, edition, defs = new Map() }) => {
   const enterprise = isEnterprise(edition);
   const editionName = EDITION_NAME[edition];
   for (const a of actions) {
@@ -35,8 +35,16 @@ export const mssqlAlterRules = ({ add, table, actions, version, edition }) => {
     }
     if (/^alter\s+column\b/i.test(a) && !METADATA_ONLY.test(a)) {
       const online = ONLINE_ON.test(a);
-      if (!online || !versionAtLeast(version, ONLINE_ALTER_COLUMN_YEAR))
-        add('mssql-alter-column', `ALTER COLUMN on ${table} without WITH (ONLINE = ON) ${versionAtLeast(version, ONLINE_ALTER_COLUMN_YEAR) ? '' : `(it does not exist before SQL Server ${ONLINE_ALTER_COLUMN_YEAR}; ${version.label} given) `}can rewrite the column under a schema modification lock (Sch-M) that blocks all access for the whole operation: widening a varchar/nvarchar/varbinary keeps it a metadata change, anything else (type, nullability, collation, narrowing) is size-of-data — new column, backfill, switch, drop later; or ${enterprise ? 'add WITH (ONLINE = ON)' : 'a maintenance window (this edition has no ONLINE)'}`);
+      const next = tsqlColumn(a.replace(/^alter\s+column\s+/i, ''));
+      const prev = next && defs.get(`${table}.${next.column}`);
+      const problem = prev ? widenOnlyProblem(prev, next) : null;
+      // a longer varchar/nvarchar/varbinary with the same nullability and collation only changes metadata
+      if (prev && !problem) continue;
+      const why = !next ? '' : prev
+        ? ` Not a metadata-only change here: ${problem}.`
+        : ` The previous definition of ${next.column} is unknown (no CREATE TABLE, ADD or ALTER COLUMN for it in this file, the earlier migrations or --schema), so a widening that only changes metadata cannot be told apart from a rewrite: pass the earlier SQL with --schema to let the linter check.`;
+      if (!online ||!versionAtLeast(version, ONLINE_ALTER_COLUMN_YEAR))
+        add('mssql-alter-column', `ALTER COLUMN on ${table} without WITH (ONLINE = ON) ${versionAtLeast(version, ONLINE_ALTER_COLUMN_YEAR) ? '' : `(it does not exist before SQL Server ${ONLINE_ALTER_COLUMN_YEAR}; ${version.label} given) `}can rewrite the column under a schema modification lock (Sch-M) that blocks all access for the whole operation: widening a varchar/nvarchar/varbinary keeps it a metadata change, anything else (type, nullability, collation, narrowing) is size-of-data — new column, backfill, switch, drop later; or ${enterprise ? 'add WITH (ONLINE = ON)' : 'a maintenance window (this edition has no ONLINE)'}.${why}`);
       else if (enterprise)
         add('mssql-alter-column', `ALTER COLUMN ... WITH (ONLINE = ON) on ${table} keeps the table readable and writable but builds a second copy of the column: it doubles the space and the log for the duration, and still takes Sch-M briefly at both ends — run it off-peak with a LOCK_TIMEOUT`, { level: WARN });
     }
