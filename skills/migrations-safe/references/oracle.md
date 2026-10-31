@@ -52,7 +52,7 @@ so keep one DDL per migration or make each step safe to re-run.
 
 ## Rehearsal
 
-`rehearse.mjs --engine oracle:23-slim-faststart` runs `gvenzl/oracle-free` and reaches it with `sqlplus`
+`rehearse.mjs --engine oracle:23.5-slim-faststart` runs `gvenzl/oracle-free` and reaches it with `sqlplus`
 (`WHENEVER SQLERROR EXIT FAILURE`, `SET DEFINE OFF`, the session tagged with `DBMS_APPLICATION_INFO.SET_MODULE`).
 Locks are read from `v$lock` (TM locks in modes 4, 5 and 6) and `dba_ddl_locks` as SYSTEM. The container runs on
 a private network with no outside access (Oracle's instance does not start without a non-loopback interface); the

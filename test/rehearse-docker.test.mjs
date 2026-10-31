@@ -583,7 +583,7 @@ if (pgEngine) {
     const elsewhere = { name: `msafe-rehearse-${deadPid}-cccccc`, owner: `${OWNER}/another-system` };
     const otherBoot = { name: `msafe-rehearse-${deadPid}-dddddd`, owner: `${OWNER.replace(/\/boot-[^/]*$/, '')}/boot-another-boot` };
     for (const { name: n, owner } of [abandoned, running, elsewhere, otherBoot]) {
-      const r = spawnSync('docker', ['run', '-d', '--label', 'msafe-rehearse=1', '--label', `msafe-owner=${owner}`, '--name', n, '--network', 'none', 'alpine:latest', 'sleep', '600'], { encoding: 'utf8', windowsHide: true });
+      const r = spawnSync('docker', ['run', '-d', '--label', 'msafe-rehearse=1', '--label', `msafe-owner=${owner}`, '--name', n, '--network', 'none', 'alpine:3.20.3', 'sleep', '600'], { encoding: 'utf8', windowsHide: true });
       assert.equal(r.status, 0, r.stderr);
       t.after(() => remove(n));
     }

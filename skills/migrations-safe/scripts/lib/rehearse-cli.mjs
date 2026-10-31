@@ -5,7 +5,7 @@ import { DEFAULT_LOCK_BUDGET_MS, parseDuration, parseEngine, rehearseDocker } fr
 export const usage = (name) => `usage: ${name} [--engine <engine>] <database.sqlite | seed.sql> <migration.sql>... [--down [<down.sql>...]] [options]
 
   --engine <engine>   sqlite (default) | postgres:<tag> | mysql:<tag> | mariadb:<tag> | mssql:<tag> | oracle:<tag> |
-                      db2:<tag>, for example postgres:16, mysql:8.4, mssql:2022-latest, oracle:23-slim or db2:11.5.9.0.
+                      db2:<tag>, for example postgres:16, mysql:8.4, mssql:2022-CU14-ubuntu-22.04, oracle:23.5-slim or db2:11.5.9.0.
                       A server engine runs a throwaway Docker container (name msafe-rehearse-*)
                       that is reached with docker exec only and removed at the end, also on failure, Ctrl+C or SIGTERM
   --edition <e>       mssql: standard (default, Express or Standard Developer) | enterprise (Developer);

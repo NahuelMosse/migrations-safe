@@ -129,7 +129,7 @@ node skills/migrations-safe/scripts/migration-lint.mjs skills/migrations-safe/fi
 ```
 
 The Docker rehearsal tests start containers (`postgres:16`, `mysql:8.4` by default; `MSAFE_DOCKER_ENGINES=postgres:17,mariadb:11`
-changes them; `mssql:2022-latest`, `oracle:23-slim-faststart` and `db2:11.5.9.0` run the other engines, which take minutes to start). Without Docker they are reported as `skipped: docker not available`; `MSAFE_REQUIRE_DOCKER=1` turns
+changes them; `mssql:2022-CU14-ubuntu-22.04`, `oracle:23.5-slim-faststart` and `db2:11.5.9.0` run the other engines, which take minutes to start). Without Docker they are reported as `skipped: docker not available`; `MSAFE_REQUIRE_DOCKER=1` turns
 that into a failure and `MSAFE_DOCKER_TESTS=0` skips them on purpose.
 
 Trigger evals live in `evals/` (run them with `claude plugin eval . --scaffold --allow-tools Bash`: four cases

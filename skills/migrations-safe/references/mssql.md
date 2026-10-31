@@ -61,7 +61,7 @@ Evaluation; `azure` is Azure SQL Database and Managed Instance.
 
 ## Rehearsal
 
-`rehearse.mjs --engine mssql:2022-latest` runs `mcr.microsoft.com/mssql/server:<tag>` and reaches it with
+`rehearse.mjs --engine mssql:2022-CU14-ubuntu-22.04` runs `mcr.microsoft.com/mssql/server:<tag>` and reaches it with
 `sqlcmd`. `--edition standard` (default) starts Express (2019, 2022) or Standard Developer (2025);
 `--edition enterprise` starts Developer. The edition the server reports (`SERVERPROPERTY('Edition')`) is
 compared with the one asked for, and a mismatch is exit 2. Express stops at 10 GB per database: a larger seed

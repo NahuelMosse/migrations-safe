@@ -26,10 +26,10 @@ jobs:
       # the Docker rehearsal tests have their own Linux job below
       MSAFE_DOCKER_TESTS: '0'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: ${{ matrix.node }}
       - run: npm test
@@ -62,19 +62,19 @@ jobs:
     env:
       MSAFE_REQUIRE_DOCKER: '1'
       # mysql:5.7 ships the metadata-lock instrument disabled; mariadb needs its metadata_lock_info plugin
-      MSAFE_DOCKER_ENGINES: postgres:16,mysql:8.4,mysql:5.7,mariadb:11
+      MSAFE_DOCKER_ENGINES: postgres:16.4,mysql:8.4.2,mysql:5.7.44,mariadb:11.4.3
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '24'
       - name: Pull the engines
         run: |
-          docker pull postgres:16
-          docker pull mysql:8.4
-          docker pull mysql:5.7
-          docker pull mariadb:11
-          docker pull alpine:latest
+          docker pull postgres:16.4
+          docker pull mysql:8.4.2
+          docker pull mysql:5.7.44
+          docker pull mariadb:11.4.3
+          docker pull alpine:3.20.3
       - name: Docker rehearsal tests
         run: node --test test/rehearse-docker.test.mjs
       - name: Rehearse the seeds on PostgreSQL and MySQL
@@ -82,11 +82,11 @@ jobs:
           S=skills/migrations-safe
           printf 'ALTER TABLE orders ADD COLUMN due_on date;\n' > /tmp/pg-add.sql
           printf 'ALTER TABLE orders ADD COLUMN due_on date NULL, ALGORITHM=INSTANT;\n' > /tmp/my-add.sql
-          node $S/scripts/rehearse.mjs --engine postgres:16 $S/fixtures/seed-postgres.sql /tmp/pg-add.sql
-          node $S/scripts/rehearse.mjs --engine mysql:8.4 $S/fixtures/seed-mysql.sql /tmp/my-add.sql
-          node $S/scripts/rehearse.mjs --engine mariadb:11 $S/fixtures/seed-mysql.sql /tmp/my-add.sql
+          node $S/scripts/rehearse.mjs --engine postgres:16.4 $S/fixtures/seed-postgres.sql /tmp/pg-add.sql
+          node $S/scripts/rehearse.mjs --engine mysql:8.4.2 $S/fixtures/seed-mysql.sql /tmp/my-add.sql
+          node $S/scripts/rehearse.mjs --engine mariadb:11.4.3 $S/fixtures/seed-mysql.sql /tmp/my-add.sql
           printf 'ALTER TABLE orders ADD COLUMN due_on date NULL;\n' > /tmp/my57-add.sql
-          node $S/scripts/rehearse.mjs --engine mysql:5.7 $S/fixtures/seed-mysql.sql /tmp/my57-add.sql
+          node $S/scripts/rehearse.mjs --engine mysql:5.7.44$S/fixtures/seed-mysql.sql /tmp/my57-add.sql
       - name: No rehearsal container is left behind
         if: always()
         run: |
@@ -100,23 +100,23 @@ jobs:
     env:
       MSAFE_REQUIRE_DOCKER: '1'
       # 2022 and 2025: --edition standard runs Express (2022) or Standard Developer (2025), --edition enterprise runs Developer
-      MSAFE_DOCKER_ENGINES: mssql:2022-latest,mssql:2025-latest
+      MSAFE_DOCKER_ENGINES: mssql:2022-CU14-ubuntu-22.04,mssql:2025-CU1-ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '24'
       - name: Pull the engines
         run: |
-          docker pull mcr.microsoft.com/mssql/server:2022-latest
-          docker pull mcr.microsoft.com/mssql/server:2025-latest
+          docker pull mcr.microsoft.com/mssql/server:2022-CU14-ubuntu-22.04
+          docker pull mcr.microsoft.com/mssql/server:2025-CU1-ubuntu-22.04
       - name: SQL Server rehearsal tests
         run: node --test test/rehearse-docker.test.mjs
       - name: Rehearse the seed on SQL Server 2022 Developer
         run: |
           S=skills/migrations-safe
           printf 'ALTER TABLE orders ADD due_on date NULL;\n' > /tmp/ms-add.sql
-          node $S/scripts/rehearse.mjs --engine mssql:2022-latest --edition enterprise $S/fixtures/seed-mssql.sql /tmp/ms-add.sql
+          node $S/scripts/rehearse.mjs --engine mssql:2022-CU14-ubuntu-22.04 --edition enterprise $S/fixtures/seed-mssql.sql /tmp/ms-add.sql
       - name: No rehearsal container or network is left behind
         if: always()
         run: |
@@ -129,14 +129,14 @@ jobs:
     runs-on: ubuntu-latest
     env:
       MSAFE_REQUIRE_DOCKER: '1'
-      MSAFE_DOCKER_ENGINES: oracle:23-slim-faststart
+      MSAFE_DOCKER_ENGINES: oracle:23.5-slim-faststart
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '24'
       - name: Pull the engine
-        run: docker pull gvenzl/oracle-free:23-slim-faststart
+        run: docker pull gvenzl/oracle-free:23.5-slim-faststart
       - name: Oracle rehearsal tests
         run: node --test test/rehearse-docker.test.mjs
       - name: No rehearsal container or network is left behind
@@ -157,8 +157,8 @@ jobs:
       MSAFE_REQUIRE_DOCKER: '1'
       MSAFE_DOCKER_ENGINES: db2:11.5.9.0
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '24'
       - name: Pull the engine
@@ -176,8 +176,8 @@ jobs:
     timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '24'
       - run: npx --yes @anthropic-ai/claude-code@2.1.316 plugin validate .

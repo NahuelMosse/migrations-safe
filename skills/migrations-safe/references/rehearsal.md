@@ -40,8 +40,8 @@ Exit 0 all ran and nothing was lost, 1 a migration failed or lost data, 2 could 
 ## PostgreSQL, MySQL, MariaDB, SQL Server, Oracle and Db2 (Docker)
 
 Same engine and version as production, never SQLite as a stand-in. Images: `postgres`, `mysql`, `mariadb`,
-`mcr.microsoft.com/mssql/server`, `gvenzl/oracle-free`, `icr.io/db2_community/db2` (`--engine mssql:2022-latest`,
-`oracle:23-slim-faststart`, `db2:11.5.9.0`). Per-engine details are in [mssql.md](mssql.md),
+`mcr.microsoft.com/mssql/server`, `gvenzl/oracle-free`, `icr.io/db2_community/db2` (`--engine mssql:2022-CU14-ubuntu-22.04`,
+`oracle:23.5-slim-faststart`, `db2:11.5.9.0`). Per-engine details are in [mssql.md](mssql.md),
 [oracle.md](oracle.md) and [db2.md](db2.md):
 
 | Engine | Client | Seed and migrations | Locks read from | Edition |
