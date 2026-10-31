@@ -356,7 +356,8 @@ for (const engine of ENGINES) {
     assert.match(r.out, /3 up\(s\) on .*: 2 problem\(s\)/);
     // the duration is read inside the server: a 1.5 s sleep takes 1.5 s whatever the docker round trip costs
     assert.match(r.out, /0002_lock\.sql in (1[4-9]\d\d|2[0-4]\d\d) ms/);
-    assert.match(r.out, /polled every ~\d+ ms/);
+    // every migration prints what the polling saw: its locks, or how often it looked (Oracle shows even a quick DDL's own lock)
+    assert.match(r.out, /polled every ~\d+ ms|held ~\d\.\d\d s \(\d+ poll\(s\)\)/);
     assert.ok(!/no write lock over/.test(r.out), 'a run with problems never claims there was no lock');
     const name = containerOf(r.out);
     assert.ok(name, 'the container name is printed');

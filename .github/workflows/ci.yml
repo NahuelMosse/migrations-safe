@@ -57,7 +57,7 @@ jobs:
 
   docker-rehearsal:
     if: github.event_name != 'schedule'
-    timeout-minutes: 30
+    timeout-minutes: 15
     runs-on: ubuntu-latest
     env:
       MSAFE_REQUIRE_DOCKER: '1'
@@ -95,7 +95,7 @@ jobs:
 
   docker-mssql:
     if: github.event_name != 'schedule'
-    timeout-minutes: 60
+    timeout-minutes: 15
     runs-on: ubuntu-latest
     env:
       MSAFE_REQUIRE_DOCKER: '1'
@@ -125,7 +125,7 @@ jobs:
 
   docker-oracle:
     if: github.event_name != 'schedule'
-    timeout-minutes: 60
+    timeout-minutes: 15
     runs-on: ubuntu-latest
     env:
       MSAFE_REQUIRE_DOCKER: '1'
@@ -151,7 +151,7 @@ jobs:
   docker-db2:
     name: docker-db2 (skipped on pull requests and push - privileged x86_64 daemon, slow start; runs on schedule and workflow_dispatch; Db2 lint rules are covered by the test job on every OS)
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    timeout-minutes: 90
+    timeout-minutes: 30
     runs-on: ubuntu-latest
     env:
       MSAFE_REQUIRE_DOCKER: '1'
