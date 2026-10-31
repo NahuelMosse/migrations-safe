@@ -169,6 +169,31 @@ test('SQL Server: --edition picks MSSQL_PID, Express stops at 10 GB, errors are 
   assert.match(ms.probe.hold, /TABLOCKX, HOLDLOCK[^]*WAITFOR DELAY '00:00:03'/);
 });
 
+test('Oracle and Db2 scripts are rebuilt from their statements for the client', () => {
+  const ora = makeEngine({ kind: 'oracle', tag: '23-slim', image: 'x' }, {});
+  const o = ora.scriptInput("SET DEFINE OFF\nALTER TABLE t ADD (c NUMBER);\nBEGIN\n  EXECUTE IMMEDIATE 'ALTER TABLE t ADD (d NUMBER)';\nEND;\n/\n", { wrap: false, marks: true });
+  assert.ok(o.marked);
+  assert.match(o.input, /SET DEFINE OFF\nALTER TABLE t ADD \(c NUMBER\);\nBEGIN\n  EXECUTE IMMEDIATE 'ALTER TABLE t ADD \(d NUMBER\)';\nEND;\n\/\n/);
+  assert.equal((o.input.match(/ALTER TABLE t ADD \(d NUMBER\)/g) ?? []).length, 1, 'the statement inside a block is not sent twice');
+  assert.match(ora.pollerArgs('c').join(' '), /SYSTEM\//);
+  assert.match(ora.scriptArgs('c', { app: 'msafe-migration', stopOnError: true }).join(' '), /WHENEVER SQLERROR EXIT FAILURE[^]*SET_MODULE\(\S{1,5}msafe-migration/);
+  assert.ok(!ora.scriptArgs('c', { app: 'x', stopOnError: false }).join(' ').includes('WHENEVER SQLERROR'));
+  assert.match(ora.pollInput(), /v\$lock[^]*dba_ddl_locks[^]*@@END/);
+  assert.equal(ora.describeError('ORA-00942: table or view does not exist'), 'ORA-00942');
+  assert.match(ora.editionNote, /not emulated/);
+  const db2 = makeEngine({ kind: 'db2', tag: '11.5.9.0', image: 'x' }, {});
+  const d = db2.scriptInput("--#SET TERMINATOR @\nCREATE TRIGGER x AFTER INSERT ON t FOR EACH ROW BEGIN ATOMIC SELECT 1 FROM sysibm.sysdummy1; END@\nALTER TABLE t ADD COLUMN c INTEGER@\n", { wrap: true, marks: true });
+  assert.match(d.input, /^UPDATE COMMAND OPTIONS USING C OFF~\nVALUES CHR\(64\)/);
+  assert.match(d.input, /BEGIN ATOMIC SELECT 1 FROM sysibm\.sysdummy1; END\n~\nALTER TABLE t ADD COLUMN c INTEGER\n~\n/);
+  assert.match(d.input, /COMMIT~\nVALUES CHR\(64\) \|\| CHR\(64\) \|\| 'T1 '/);
+  assert.match(db2.scriptArgs('c', { app: 'a', stopOnError: true }).join(' '), /-td~ -s/);
+  assert.match(db2.scriptArgs('c', { app: 'a', stopOnError: false, dump: true }).join(' '), /db2 -x -t -f/);
+  assert.match(db2.pollInput(), /MON_GET_LOCKS[^]*CLIENT_APPLNAME = 'msafe-migration'[^]*'Z', 'X', 'S', 'SIX'/);
+  assert.match(db2.runArgs({}).join(' '), /--privileged -e LICENSE=accept/);
+  assert.match(db2.pendingProbe.sql, /DROP COLUMN c2/);
+  assert.equal(db2.describeError('SQL0204N  "DB2INST1.X" is an undefined name.  SQLSTATE=42704'), 'SQL0204N');
+});
+
 test('SQL Server scripts are sent with GO batches, marks inside the server and a transaction only when the runner wraps', () => {
   const ms = makeEngine({ kind: 'mssql', tag: '2022-latest', image: 'x' });
   const plain = ms.scriptInput('ALTER TABLE t ADD c int;', { wrap: false, marks: true });
@@ -272,6 +297,15 @@ const SCENARIOS = {
     up: "-- migrate:up\nALTER TABLE users ADD (nickname VARCHAR2(50));\nUPDATE users SET nickname = SUBSTR(email, 1, INSTR(email, '@') - 1);\nCOMMIT;\n-- migrate:down\nALTER TABLE users DROP COLUMN nickname;\n",
     bad: 'ALTER TABLE no_such_table ADD (x NUMBER);\n', badRe: /ORA-00942/, after: 'ALTER TABLE users ADD (y NUMBER);\n',
   },
+  db2: {
+    seed: join(FIXTURES, 'seed-db2.sql'), add: 'ALTER TABLE orders ADD COLUMN due_on DATE;\n',
+    lock: 'UPDATE COMMAND OPTIONS USING C OFF;\nLOCK TABLE orders IN EXCLUSIVE MODE;\nCALL DBMS_ALERT.SLEEP(1.5);\nCOMMIT;\n', lockRe: /lock: X on orders held ~1\.\d\d s \(\d+ poll\(s\)\), over the 0\.5 s budget/,
+    drop: "ALTER TABLE orders DROP COLUMN note;\nCALL SYSPROC.ADMIN_CMD('REORG TABLE orders');\n",
+    dump: "CREATE TABLE users (id INTEGER NOT NULL PRIMARY KEY, email VARCHAR(100) NOT NULL);\nALTER TABLE missing_table ADD COLUMN x INTEGER;\nINSERT INTO users VALUES (1, 'a@example.com'), (2, 'b@example.com');\nCOMMIT;\n",
+    dumpError: /SQL0204N\n/,
+    up: "-- migrate:up\nALTER TABLE users ADD COLUMN nickname VARCHAR(50);\nUPDATE users SET nickname = SUBSTR(email, 1, LOCATE('@', email) - 1);\n-- migrate:down\nALTER TABLE users DROP COLUMN nickname;\nCALL SYSPROC.ADMIN_CMD('REORG TABLE users');\n",
+    bad: 'ALTER TABLE no_such_table ADD COLUMN x INTEGER;\n', badRe: /SQL0204N/, after: 'ALTER TABLE users ADD COLUMN y INTEGER;\n',
+  },
   mssql: {
     seed: join(FIXTURES, 'seed-mssql.sql'), add: 'ALTER TABLE orders ADD due_on date NULL;\n',
     lock: "BEGIN TRANSACTION;\nSELECT 1 FROM orders WITH (TABLOCKX, HOLDLOCK);\nWAITFOR DELAY '00:00:01.5';\nCOMMIT TRANSACTION;\n", lockRe: /lock: X on orders held ~1\.\d\d s \(\d+ poll\(s\)\), over the 0\.5 s budget/,
@@ -369,6 +403,25 @@ if (oraEngine) {
     t.after(() => { const n = containerOf(f.out); if (n) remove(n); });
     assert.equal(f.code, 1, f.out + f.err);
     assert.match(f.out, /statements before the failing one stay applied: Oracle DDL commits implicitly/);
+  });
+}
+
+const db2Engine = ENGINES.find((e) => e.startsWith('db2:'));
+if (db2Engine) {
+  test(`${db2Engine}: a migration that leaves a table REORG-pending fails, one that runs the REORG passes`, { skip, timeout: 3600000 }, (t) => {
+    const dir = scratch(t);
+    const drop = put(dir, '0001_drop.sql', 'ALTER TABLE orders DROP COLUMN note;\n');
+    const r = cli(['--engine', db2Engine, '--allow-loss', 'orders.note', SCENARIOS.db2.seed, drop]);
+    t.after(() => { const n = containerOf(r.out); if (n) remove(n); });
+    assert.equal(r.code, 1, r.out + r.err);
+    assert.match(r.out, /PENDING\s+up\s.*0001_drop\.sql/);
+    assert.match(r.out, /REORG PENDING: orders is unusable until a classic REORG TABLE completes/);
+    assert.ok(!exists(containerOf(r.out)));
+    const fixed = put(dir, '0002_drop.sql', "ALTER TABLE orders DROP COLUMN note;\nCALL SYSPROC.ADMIN_CMD('REORG TABLE orders');\n");
+    const ok = cli(['--engine', db2Engine, '--allow-loss', 'orders.note', SCENARIOS.db2.seed, fixed]);
+    t.after(() => { const n = containerOf(ok.out); if (n) remove(n); });
+    assert.equal(ok.code, 0, ok.out + ok.err);
+    assert.ok(!/REORG PENDING/.test(ok.out));
   });
 }
 

@@ -1,5 +1,6 @@
 // One engine per run; each module returns the docker exec prefix, the SQL its lock poller runs and the
 // queries that read the schema back.
+import { makeDb2 } from './db2.mjs';
 import { makeMssql } from './mssql.mjs';
 import { makeMysql } from './mysql.mjs';
 import { makeOracle } from './oracle.mjs';
@@ -17,5 +18,6 @@ export const makeEngine = (spec, opts = {}) => {
   if (spec.kind === 'postgres') return makePostgres(spec);
   if (spec.kind === 'mssql') return makeMssql(spec, opts);
   if (spec.kind === 'oracle') return makeOracle(spec, opts);
+  if (spec.kind === 'db2') return makeDb2(spec);
   return makeMysql(spec);
 };

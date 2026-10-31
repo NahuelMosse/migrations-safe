@@ -232,11 +232,12 @@ const loadSeed = async (eng, name, file, dump, print) => {
     if (r.code !== 0 || errors.length) print(`seed: pg_restore exited ${r.code} with ${errors.length} error line(s)`);
     return;
   }
-  const args = eng.scriptArgs(name, { app: SEED_APP, stopOnError: !dump, wrap: false });
+  const args = eng.scriptArgs(name, { app: SEED_APP, stopOnError: !dump, wrap: false, dump });
   let r;
   if (dump) r = await docker(args, { stream: gz ? createReadStream(file).pipe(createGunzip()) : createReadStream(file), timeoutMs: 3600000 });
   else {
-    r = await docker(args, { input: decodeSql(gz ? gunzipSync(readFileSync(file)) : readFileSync(file)) });
+    const text = decodeSql(gz ? gunzipSync(readFileSync(file)) : readFileSync(file));
+    r = await docker(args, { input: eng.seedInput ? eng.seedInput(text) : text });
   }
   if (!dump && r.code !== 0) throw new RehearsalUsageError(`the seed ${file} did not load: ${failText(eng, r)}`);
   const errors = eng.errorLines(eng.errorsOnStdout ? `${r.err}\n${r.out}` : r.err);
@@ -323,8 +324,16 @@ export const rehearseDocker = async (opts, print) => {
       if (!seen) await sleep(100);
     }
     await holder;
+    // a second proof for engines that report a state after the migration (Db2 REORG-pending): provoke it on the probe table
+    let pendingSeen = true;
+    if (eng.pendingProbe) {
+      await docker(eng.scriptArgs(name, { app: SEED_APP, stopOnError: true, wrap: false }), { input: eng.pendingProbe.sql });
+      pendingSeen = (await eng.pending(name)).includes(eng.pendingProbe.table);
+    }
     await docker(eng.scriptArgs(name, { app: SEED_APP, stopOnError: true, wrap: false }), { input: eng.probe.drop });
     if (!seen) throw new RehearsalUsageError(`lock measurement failed its self-test: a lock held on a probe table was not seen by the polling session (${poller.state.error ?? setupError ?? (poller.state.died ? 'the polling session ended' : 'no row returned')}); nothing was measured, so nothing is reported`);
+    if (!pendingSeen) throw new RehearsalUsageError('REORG-pending detection failed its self-test: a DROP COLUMN on a probe table was not reported as REORG pending; migrations that leave a table unusable would pass unnoticed, so nothing is reported');
+    let pendingNow = new Set();
 
     let failed = 0;
     let unmeasured = 0;
@@ -346,6 +355,9 @@ export const rehearseDocker = async (opts, print) => {
       const t = (tag) => Number(r.out.match(new RegExp(`^@@${tag} ([\\d.]+)`, 'm'))?.[1]);
       const ms = marked && t('T1') >= t('T0') ? (t('T1') - t('T0')) * 1000 : Math.max(0, b - a - overhead);
       current = await snapshotOf(eng, name);
+      const pendingAll = eng.pending ? await eng.pending(name) : [];
+      const fresh = pendingAll.filter((tbl) => !pendingNow.has(tbl));
+      pendingNow = new Set(pendingAll);
       const { lines, lost } = diff(before, current, kind, allowLoss);
       await sleep(POLL_PAUSE_MS * 2);
       const window = poller.samples.filter((s) => s.t >= a && s.t <= b + 200);
@@ -356,11 +368,12 @@ export const rehearseDocker = async (opts, print) => {
       else if (poller.state.died) notMeasured = 'the polling session ended';
       else if (b - a >= 300 && window.length < 2) notMeasured = `${window.length} poll(s) during a ${Math.round(b - a)} ms migration`;
       if (notMeasured) unmeasured++;
-      const bad = lost.length || over.length || notMeasured;
+      const bad = lost.length || over.length || notMeasured || fresh.length;
       if (bad) failed++;
-      print(`${lost.length ? 'LOST   ' : over.length ? 'LOCKED ' : notMeasured ? 'UNMEAS.' : 'ran    '} ${kind.padEnd(4)} ${file} in ${ms.toFixed(0)} ms`);
+      print(`${lost.length ? 'LOST   ' : over.length ? 'LOCKED ' : fresh.length ? 'PENDING' : notMeasured ? 'UNMEAS.' : 'ran    '} ${kind.padEnd(4)} ${file} in ${ms.toFixed(0)} ms`);
       lines.forEach((l) => print(`          ${l}`));
       lost.forEach((l) => print(`          lost: ${l}`));
+      fresh.forEach((tbl) => print(`          REORG PENDING: ${tbl} is unusable until a classic REORG TABLE completes (SQLSTATE 57007): the migration needs CALL SYSPROC.ADMIN_CMD('REORG TABLE ${tbl}')`));
       held.forEach((l) => print(`          lock: ${l.modes.join(' + ')} on ${l.table} held ~${(l.ms / 1000).toFixed(2)} s (${l.polls} poll(s))${l.ms > budget ? `, over the ${seconds(budget)} s budget` : ''}`));
       if (notMeasured) print(`          lock: NOT MEASURED (${notMeasured}): this migration's locks are unknown`);
       else if (!held.length) print(`          lock: no write-blocking lock seen on tables that existed before (polled every ~${Math.round(pollGap(window))} ms)`);
