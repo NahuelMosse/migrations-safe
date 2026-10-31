@@ -209,7 +209,7 @@ export const sniffDialect = (sql) => {
   const code = sql.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/--[^\n]*/g, ' ');
   const bare = code.replace(/'(?:[^']|'')*'/g, "''");
   if (/\bpragma\b|\bautoincrement\b|\bwithout rowid\b/i.test(code)) return 'sqlite';
-  if (/\badmin_cmd\b|\bsysproc\.|\bwlm_set_client_info\b/i.test(bare)) return 'db2';
+  if (/\badmin_cmd\b|\bsysproc\.|\bsysibm\.|\bwlm_set_client_info\b|\bcurrent\s+lock\s+timeout\b|\bset\s+integrity\b|\breorg\s+table\b/i.test(bare)) return 'db2';
   if (/^\s*go(?:\s+\d+)?\s*$/im.test(bare) || /(?:^|[\s.(,])\[[A-Za-z_][\w ]*\](?=[\s.,;)=]|$)/.test(bare)
     || /\bsp_rename\b|\bnvarchar\b|\bidentity\s*\(\s*\d|\bgetdate\s*\(|\bset\s+nocount\b|\bwith\s*\(\s*online\s*=/i.test(bare)) return 'mssql';
   if (/^\s*\/\s*$/m.test(bare) || /\bvarchar2\b|\bnvarchar2\b|\bexecute\s+immediate\b|\bfrom\s+dual\b|\bddl_lock_timeout\b|\bdbms_\w+|\bset\s+unused\b|\benable\s+novalidate\b|\bnumber\s*\(\s*\d|\bmodify\s*\(/i.test(bare)) return 'oracle';

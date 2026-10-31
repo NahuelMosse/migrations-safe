@@ -10,6 +10,8 @@ import { normalizeTsqlActions, spRename } from './mssql.mjs';
 import { DROP_COLUMN_NOTE, mssqlAlterRules, mssqlIndexRules } from './mssql-rules.mjs';
 import { COMMITS, DDL_LOCK_TIMEOUT, isDdl, isDml } from './oracle.mjs';
 import { oracleAlterRules, oracleStatementRules } from './oracle-rules.mjs';
+import { COMMIT, INPLACE, LOCK_TIMEOUT as DB2_LOCK_TIMEOUT, REORG_STATEMENT, REORG_UNIT_LIMIT } from './db2.mjs';
+import { db2AlterRules } from './db2-rules.mjs';
 
 export const ERROR = 'error';
 export const WARN = 'warning';
@@ -65,6 +67,11 @@ export const RULES = [
   { id: 'oracle-constraint-validate', level: ERROR, area: 'lock' },
   { id: 'oracle-drop-column-rewrites', level: WARN, area: 'lock' },
   { id: 'oracle-missing-slash', level: ERROR, area: 'tool' },
+  { id: 'db2-reorg-pending', level: ERROR, area: 'lock' },
+  { id: 'db2-reorg-offline', level: WARN, area: 'lock' },
+  { id: 'db2-reorg-limit', level: ERROR, area: 'lock' },
+  { id: 'db2-constraint-check', level: ERROR, area: 'lock' },
+  { id: 'db2-lock-timeout', level: WARN, area: 'lock' },
   { id: 'missing-lock-timeout', level: WARN, area: 'lock' },
   { id: 'concurrently-in-transaction', level: ERROR, area: 'transaction' },
   { id: 'transaction-conflict', level: WARN, area: 'transaction' },
@@ -84,7 +91,7 @@ const VOLATILE_FN = /\b(?:random|setseed|gen_random_uuid|uuid_generate_v\w+|cloc
 const DEFAULT_END = /\b(?:not null|null|check|references|unique|primary key|constraint|collate|generated|on update)\b/i;
 const NON_COLUMN_ADD = /^(?:constraint|index|key|unique|primary|foreign|check|fulltext|spatial|partition)\b/i;
 const NOT_COLUMN_DROP = /^drop (?:constraint|index|key|default|not null|primary|foreign|check|partition|expression|identity)\b/i;
-const NON_DDL = /^(?:begin|start transaction|commit|rollback|alter\s+session\b|end\b|if\b|else\b|use\b|print\b|declare\b|:\w|@|prompt\b|whenever\b|spool\b|exit\b|quit\b|rem\b|define\b|set\b|pragma\b|select\b)/i;
+const NON_DDL = /^(?:begin|start transaction|commit|rollback|alter\s+session\b|call\b|reorg\b|runstats\b|connect\b|terminate\b|end\b|if\b|else\b|use\b|print\b|declare\b|:\w|@|prompt\b|whenever\b|spool\b|exit\b|quit\b|rem\b|define\b|set\b|pragma\b|select\b)/i;
 const TX_START =/^(?:begin|start transaction)\b/i;
 const LOCK_TIMEOUT = /^(?:set\s+(?:session\s+|local\s+)?lock_timeout\b|select\s+set_config\s*\(\s*'lock_timeout')/i;
 const MYSQL_LOCK_WAIT = /^(?:set\s+(?:session\s+|local\s+|@@session\.|@@local\.|@@)?lock_wait_timeout\s*=|set\s+statement\b.*\block_wait_timeout\s*=)/i;
@@ -147,6 +154,12 @@ export const lintSql = (sql, ctx = {}) => {
   const my = dialect === 'mysql';
   const ms = dialect === 'mssql';
   const ora = dialect === 'oracle';
+  const db2 = dialect === 'db2';
+  // REORG-recommended units of work per table since its last REORG, kept across the files of one run
+  const reorgUnits = ctx.reorgUnits ?? new Map();
+  const pendingReorg = new Map();
+  const countedUnit = new Map();
+  let unit = 0;
   const serverVersion = ctx.serverVersion ?? parseServerVersion(dialect, DEFAULT_SERVER_VERSION[dialect]);
   const edition = ctx.edition ?? DEFAULT_EDITION[dialect];
   const mysqlVersion = ctx.mysqlVersion ?? parseMysqlVersion(DEFAULT_MYSQL_VERSION);
@@ -212,6 +225,19 @@ export const lintSql = (sql, ctx = {}) => {
     const existing = isExisting(table);
     const actions = ms ? normalizeTsqlActions(rawActions) : rawActions;
     if (my && existing) mysqlAlterRules(k, table, actions);
+    if (db2 && existing) {
+      const ops = db2AlterRules({ add: (rule, message, extra) => add(k, rule, message, extra), table, actions });
+      if (ops.length) {
+        if (!pendingReorg.has(table)) pendingReorg.set(table, { k, op: ops[0] });
+        if (countedUnit.get(table) !== unit) {
+          countedUnit.set(table, unit);
+          const n = (reorgUnits.get(table) ?? 0) + 1;
+          reorgUnits.set(table, n);
+          if (n > REORG_UNIT_LIMIT)
+            add(k, 'db2-reorg-limit', `this is the ${n}th unit of work with a REORG-recommended operation (${ops[0]}) on ${table} since its last REORG TABLE: Db2 allows ${REORG_UNIT_LIMIT} and then fails with SQLSTATE 55019 until a classic offline REORG TABLE has run — put CALL SYSPROC.ADMIN_CMD('REORG TABLE ${table}') between the groups, or group the operations into one unit of work (they count once)`);
+        }
+      }
+    }
     if (ora && existing) oracleAlterRules({ add: (rule, message, extra) => add(k, rule, message, extra), table, actions, version: serverVersion, text, edition });
     if (ms && existing) mssqlAlterRules({ add: (rule, message, extra) => add(k, rule, message, extra), table, actions, version: serverVersion, edition });
     if (dialect === 'mysql' && !/\balgorithm\s*=/i.test(text))
@@ -273,6 +299,7 @@ export const lintSql = (sql, ctx = {}) => {
   let reportedPragma = false;
   texts.forEach((t, k) => {
     const b = bare[k];
+    if (db2 && k > 0 && (!wrapped || COMMIT.test(texts[k - 1]))) unit++;
     if (ora && !statements[k].command) {
       if (pendingDml !== -1 && isDdl(t))
         add(k, 'oracle-ddl-commits-dml', `a DDL statement commits the transaction: the DML at line ${statements[pendingDml].line} (and everything since the last COMMIT) is committed here, so a failure afterwards does not roll it back — COMMIT it on purpose before the DDL, or move the data change to its own migration`);
@@ -304,6 +331,17 @@ export const lintSql = (sql, ctx = {}) => {
       if (sp?.kind === 'object' && !created.has(sp.table) && !rebuilt(name(sp.to)))
         add(k, 'rename-table', `renames table ${sp.table} in one step (sp_rename): create the new one (or a view with the old name) and move readers first`);
       if (sp && firstLock === -1 && isExisting(sp.table)) firstLock = k;
+    }
+    if (db2) {
+      const reorg = t.match(REORG_STATEMENT);
+      if (reorg) {
+        const table = name(reorg[1]);
+        pendingReorg.delete(table);
+        reorgUnits.set(table, 0);
+        if (isExisting(table) && firstLock === -1) firstLock = k;
+        if (!INPLACE.test(t))
+          add(k, 'db2-reorg-offline', `a classic REORG TABLE rewrites ${table} and blocks writers for as long as it takes (the table is read-only at best): run it in a window, and size the window from a rehearsal on a copy of production data`, { level: WARN });
+      }
     }
     if (ora) {
       const stmt = statements[k];
@@ -379,7 +417,7 @@ export const lintSql = (sql, ctx = {}) => {
       reportedPragma = true;
       add(k, 'transaction-conflict', `PRAGMA foreign_keys is a no-op inside the transaction ${profile.label} wraps around the file, so DROP TABLE still runs ON DELETE CASCADE / SET NULL on child rows. Run the rebuild in the runner's no-transaction mode, where foreign_keys=OFF takes effect (PRAGMA defer_foreign_keys only helps plain NO ACTION foreign keys), and rehearse it with real child rows`, { level: copiedFrom.size ? ERROR : WARN });
     }
-    if ((my ? MYSQL_LOCK_WAIT : ora ? DDL_LOCK_TIMEOUT : LOCK_TIMEOUT).test(t) && lockTimeoutAt === -1) lockTimeoutAt = k;
+    if ((my ? MYSQL_LOCK_WAIT : ora ? DDL_LOCK_TIMEOUT : db2 ? DB2_LOCK_TIMEOUT : LOCK_TIMEOUT).test(t) && lockTimeoutAt === -1) lockTimeoutAt = k;
     applySchema(tables, t);
   });
 
@@ -387,6 +425,14 @@ export const lintSql = (sql, ctx = {}) => {
     add(firstLock, 'mysql-lock-wait-timeout', lockTimeoutAt === -1
       ? `DDL on an existing table without SET SESSION lock_wait_timeout: the statement waits for the table's metadata lock behind any open transaction (even an idle one) and every later query on the table queues behind it — SET SESSION lock_wait_timeout = 5 (MariaDB also accepts \`WAIT 5\` on the ALTER) and retry with backoff`
       : 'lock_wait_timeout is set after the first DDL on an existing table, so that statement waits for its lock without a limit: move the SET before it', { line: statements[firstLock].line });
+
+  for (const [table, p] of pendingReorg)
+    add(p.k, 'db2-reorg-pending', `${p.op} puts ${table} in REORG-pending state: until a classic REORG TABLE completes, most operations on it fail with SQLSTATE 57007 (reads are limited to table scans) — follow the statement with CALL SYSPROC.ADMIN_CMD('REORG TABLE ${table}') in this migration, and rehearse how long it takes`);
+
+  if (db2 && firstLock !== -1 && (lockTimeoutAt === -1 || lockTimeoutAt > firstLock))
+    add(firstLock, 'db2-lock-timeout', lockTimeoutAt === -1
+      ? "DDL on an existing table without SET CURRENT LOCK TIMEOUT: LOCKTIMEOUT defaults to -1, so the statement waits for its lock without limit behind any transaction holding the table, and every later query queues behind it — SET CURRENT LOCK TIMEOUT 5 first, and retry on failure"
+      : 'CURRENT LOCK TIMEOUT is set after the first DDL on an existing table, so that statement waits for its lock without a limit: move the SET before it', { line: statements[firstLock].line });
 
   if (ora && firstLock !== -1 && (lockTimeoutAt === -1 || lockTimeoutAt > firstLock))
     add(firstLock, 'oracle-ddl-lock-timeout', lockTimeoutAt === -1

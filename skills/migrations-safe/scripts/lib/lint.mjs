@@ -142,7 +142,7 @@ export const lintTargets = (opts) => {
   };
   const versionOfDir = new Map();
   // What earlier files and --schema files taught about ENUMs, indexes, column types and instant row versions.
-  const shared = { instantVersions: new Map(), enums: new Map(), indexed: new Map(), defs: new Map() };
+  const shared = { instantVersions: new Map(), enums: new Map(), indexed: new Map(), defs: new Map(), reorgUnits: new Map() };
   const serverNow = { v: parseMysqlVersion(opts.mysqlVersion ?? opts.serverVersion) ?? parseMysqlVersion(DEFAULT_MYSQL_VERSION) };
   const linted = new Set(); // files the rules already learned from, so replaying them would count twice
   const learn = (sql, file) => {
