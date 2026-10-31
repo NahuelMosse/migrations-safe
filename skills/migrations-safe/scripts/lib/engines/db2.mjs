@@ -33,7 +33,7 @@ export const makeDb2 = ({ kind, image }) => {
   const clp = (c, { app, stopOnError = true, dump = false } = {}) => ['exec', '-i', c, 'sh', '-c',
     `{ printf '%s\\n' ${(dump ? prologue(app).map((l) => l.replace(/~$/, ';')) : prologue(app)).map(shq).join(' ')}; cat; } | su - db2inst1 -c "db2 -x -t${dump ? '' : 'd~'}${stopOnError ? ' -s' : ''} -f /dev/stdin"; rc=$?; if [ $rc -ge 4 ]; then exit 1; fi; exit 0`];
   const eng = {
-    kind, image, label: 'Db2', dialect: 'db2', password: PASSWORD, database: DATABASE, implicitCommit: false, startupMs: 1800000, needsNetwork: true,
+    kind, image, label: 'Db2', dialect: 'db2', password: PASSWORD, database: DATABASE, implicitCommit: false, startupMs: 1200000, needsNetwork: true,
     editionNote: 'edition: Db2 Community Edition (the image limits memory and cores; the DDL behaviour the rules rely on is the same as in the licensed editions)',
     runArgs: () => ['--privileged', '-e', 'LICENSE=accept', '-e', `DB2INST1_PASSWORD=${PASSWORD}`, '-e', `DBNAME=${DATABASE}`, '-e', 'ARCHIVE_LOGS=false', '-e', 'AUTOCONFIG=false', image],
     readyArgs: (c) => ['exec', '-i', c, 'sh', '-c', `su - db2inst1 -c 'db2 connect to ${DATABASE} > /dev/null && db2 -x "VALUES 1"'`],

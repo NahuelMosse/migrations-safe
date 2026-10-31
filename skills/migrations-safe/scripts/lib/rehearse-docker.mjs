@@ -207,7 +207,10 @@ const waitReady = async (eng, name, timeoutMs) => {
     await eng.detect?.(name);
     const r = await docker(eng.readyArgs(name), { timeoutMs: 30000 });
     if (r.code === 0 && /\b1\b/.test(r.out)) return;
-    if (Date.now() - t0 > timeoutMs) throw new RehearsalUsageError(`${eng.label} did not accept connections within ${Math.round(timeoutMs / 1000)} s (${firstLines(r.err, 2)})`);
+    if (Date.now() - t0 > timeoutMs) {
+      const logs = await docker(['logs', '--tail', '6', name], { timeoutMs: 30000 });
+      throw new RehearsalUsageError(`${eng.label} did not accept connections within ${Math.round(timeoutMs / 1000)} s (${firstLines(r.err || r.out, 2)}; the container's last log lines: ${firstLines(`${logs.out}\n${logs.err}`.split(/\r?\n/).slice(-8).join('\n'), 6)})`);
+    }
     await sleep(500);
   }
 };
