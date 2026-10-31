@@ -151,8 +151,6 @@ claude plugin marketplace update migrations-safe
 claude plugin update migrations-safe@migrations-safe
 ```
 
-To vendor only the skill directory: `npx skills add NahuelMosse/migrations-safe`.
-
 ## Development
 
 ```bash
