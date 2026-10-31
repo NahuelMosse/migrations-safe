@@ -2,13 +2,13 @@
 // It exists so the linter can compare a SQLite table rebuild against the table it replaces.
 import { flat, ident, name, parse, splitTopLevel } from './parse.mjs';
 
-const ALTER_RE = new RegExp(String.raw`^alter table (?:if exists )?(?:only )?(${ident})(?: \*)?\s+(.*)$`, 'is');
+const ALTER_RE = new RegExp(String.raw`^alter (?:online )?(?:ignore )?table (?:if exists )?(?:only )?(${ident})(?: \*)?\s+(?:(wait\s+\d+|nowait)\s+)?(.*)$`, 'is');
 const CREATE_RE = new RegExp(String.raw`^create (?:temp(?:orary)? |unlogged )?table (?:if not exists )?(${ident})\s*\((.*)\)[^)]*$`, 'is');
 const CONSTRAINT_START = /^(constraint|primary|foreign|unique|check|key|index|fulltext|spatial|like|exclude)\b/i;
 
 export const parseAlter = (text) => {
   const m = text.match(ALTER_RE);
-  return m ? { table: name(m[1]), actions: splitTopLevel(m[2]) } : null;
+  return m ? { table: name(m[1]), actions: splitTopLevel(m[3]), wait: m[2] !== undefined } : null;
 };
 
 export const columnsOfCreate = (text) => {

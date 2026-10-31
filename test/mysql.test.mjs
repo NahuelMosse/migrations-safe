@@ -23,7 +23,11 @@ test('mysql-lock-wait-timeout: any DDL on an existing table needs lock_wait_time
   has('ALTER TABLE t ADD COLUMN c int NULL, ALGORITHM=INSTANT;', 'mysql-lock-wait-timeout');
   lacks(`${SET}ALTER TABLE t ADD COLUMN c int NULL, ALGORITHM=INSTANT;`, 'mysql-lock-wait-timeout');
   has(`ALTER TABLE t ADD COLUMN c int NULL, ALGORITHM=INSTANT;\n${SET}`, 'mysql-lock-wait-timeout');
-  lacks('ALTER TABLE t ADD COLUMN c int NULL, ALGORITHM=INSTANT, WAIT 5;', 'mysql-lock-wait-timeout');
+  lacks('ALTER TABLE t WAIT 5 ADD COLUMN c int NULL, ALGORITHM=INSTANT;', 'mysql-lock-wait-timeout');
+  lacks('ALTER TABLE t NOWAIT ADD COLUMN c int NULL, ALGORITHM=INSTANT;', 'mysql-lock-wait-timeout');
+  lacks('SET @@lock_wait_timeout = 5;\nALTER TABLE t ADD COLUMN c int NULL, ALGORITHM=INSTANT;', 'mysql-lock-wait-timeout');
+  lacks('SET LOCAL lock_wait_timeout = 5;\nALTER TABLE t ADD COLUMN c int NULL, ALGORITHM=INSTANT;', 'mysql-lock-wait-timeout');
+  has('SET GLOBAL lock_wait_timeout = 5;\nALTER TABLE t ADD COLUMN c int NULL, ALGORITHM=INSTANT;', 'mysql-lock-wait-timeout');
   has('RENAME TABLE a TO b;', 'mysql-lock-wait-timeout');
   has('OPTIMIZE TABLE t;', 'mysql-lock-wait-timeout');
   has('CREATE INDEX i ON t (c);', 'mysql-lock-wait-timeout');
@@ -190,11 +194,132 @@ test('the server version is read from a compose file or workflow next to the mig
   // an explicit flag wins
   const flag = lintCli([join(dir, 'db/migrations'), '--format', 'json', '--mysql-version', '8.4']);
   assert.deepEqual(JSON.parse(flag.out).findings, []);
-  // two different declarations are ambiguous, so the default applies
-  put(dir, '.github/workflows/ci.yml', 'jobs:\n  t:\n    services:\n      db:\n        image: mariadb:10.6\n');
-  assert.equal(projectMysqlVersion(join(dir, 'db/migrations')), null);
+  // declarations that disagree: the oldest of the flavor is used and the run says so
+  put(dir, '.github/workflows/ci.yml', 'jobs:\n  t:\n    services:\n      db:\n        image: mysql:8.0.20\n');
+  put(dir, 'docker-compose.yml', 'services:\n  db:\n    image: mysql:5.7\n');
+  const conflict = projectMysqlVersion(join(dir, 'db/migrations'));
+  assert.equal(conflict.version.label, 'MySQL 5.7');
+  assert.deepEqual(conflict.conflict.sort(), ['MySQL 5.7', 'MySQL 8.0.20']);
+  const noted = JSON.parse(lintCli([join(dir, 'db/migrations'), '--format', 'json']).out).notes.join('\n');
+  assert.match(noted, /disagree \(MySQL 5\.7, MySQL 8\.0\.20\): using the oldest, MySQL 5\.7/);
   put(dir, '.github/workflows/ci.yml', 'jobs:\n  t:\n    services:\n      db:\n        image: mysql:8.0.28\n');
-  assert.equal(projectMysqlVersion(join(dir, 'db/migrations')).version.label, 'MySQL 8.0.28');
+  put(dir, 'docker-compose.yml', 'services:\n  db:\n    image: mysql:8.0.28\n');
+  assert.equal(projectMysqlVersion(join(dir, 'db/migrations')).conflict, null);
+  // a tag without minor ("mysql:8", "mariadb:11") is read as the newest of that major
+  put(dir, 'docker-compose.yml', 'services:\n  db:\n    image: mysql:8\n');
+  put(dir, '.github/workflows/ci.yml', 'name: ci\n');
+  assert.equal(projectMysqlVersion(join(dir, 'db/migrations')).version.major, 8);
+  assert.match(projectMysqlVersion(join(dir, 'db/migrations')).version.label, /MySQL 8 \(newest minor\)/);
+});
+
+// What earlier migrations taught: shared maps filled by linting the CREATE TABLE first.
+const afterCreate = (create, version) => {
+  const shared = { enums: new Map(), indexed: new Map(), defs: new Map(), instantVersions: new Map(), ...(version ? ver(version) : {}) };
+  my(create, shared);
+  return shared;
+};
+const level = (sql, rule, ctx) => findings(sql, { dialect: 'mysql', ...ctx }).find((f) => f.rule === rule)?.level;
+
+test('S4: error-level algorithm findings are limited to what the server really rejects', () => {
+  const t = afterCreate('CREATE TABLE t (id int, a int NULL, name varchar(50) NOT NULL, note text);');
+  // a default-only MODIFY runs INSTANT on MySQL 8.0.29+
+  lacks(`${SET}ALTER TABLE t MODIFY a int NULL DEFAULT 5, ALGORITHM=INSTANT;`, 'mysql-algorithm-unsupported', t);
+  // a type or nullability change does not, and the earlier definition makes it certain
+  assert.equal(level(`${SET}ALTER TABLE t MODIFY a bigint NULL, ALGORITHM=INSTANT;`, 'mysql-algorithm-unsupported', afterCreate('CREATE TABLE t (id int, a int NULL);')), 'error');
+  assert.equal(level(`${SET}ALTER TABLE t MODIFY name varchar(50) NULL, ALGORITHM=INSTANT;`, 'mysql-algorithm-unsupported', afterCreate('CREATE TABLE t (id int, name varchar(50) NOT NULL);')), 'error');
+  // without the earlier definition it is only a warning
+  assert.equal(level(`${SET}ALTER TABLE t MODIFY a int NULL DEFAULT 5, ALGORITHM=INSTANT;`, 'mysql-algorithm-unsupported'), 'warning');
+  // CONVERT with INPLACE can run (unindexed utf8mb3 to utf8mb4): a warning, not an error
+  assert.equal(level(`${SET}ALTER TABLE t CONVERT TO CHARACTER SET utf8mb4, ALGORITHM=INPLACE, LOCK=NONE;`, 'mysql-algorithm-unsupported'), 'warning');
+  assert.equal(level(`${SET}ALTER TABLE t CONVERT TO CHARACTER SET utf8mb4, ALGORITHM=INSTANT;`, 'mysql-algorithm-unsupported'), 'error');
+  // MariaDB 10.4+ runs charset changes, repositioning and CONVERT with INSTANT
+  const maria = ver('mariadb-11.8');
+  const m = afterCreate('CREATE TABLE t (id int, name varchar(50) NOT NULL);', 'mariadb-11.8');
+  lacks(`${SET}ALTER TABLE t MODIFY name varchar(50) NOT NULL COLLATE utf8mb4_bin, ALGORITHM=INSTANT;`, 'mysql-algorithm-unsupported', m);
+  lacks(`${SET}ALTER TABLE t MODIFY name varchar(50) NOT NULL FIRST, ALGORITHM=INSTANT;`, 'mysql-algorithm-unsupported', m);
+  lacks(`${SET}ALTER TABLE t CONVERT TO CHARACTER SET utf8mb4, ALGORITHM=INSTANT;`, 'mysql-algorithm-unsupported', maria);
+  lacks(`${SET}ALTER TABLE t CONVERT TO CHARACTER SET utf8mb4, ALGORITHM=INPLACE;`, 'mysql-algorithm-unsupported', maria);
+  // MariaDB 11.2+ copies online: the text must not say writes are blocked
+  const copy = findings(`${SET}ALTER TABLE t DROP PRIMARY KEY, ALGORITHM=COPY;`, { dialect: 'mysql', ...maria }).find((f) => f.rule === 'mysql-drop-primary-key');
+  assert.match(copy.message, /online on MariaDB 11\.2\+/);
+  assert.ok(!/writes are blocked/.test(copy.message));
+  const old = findings(`${SET}ALTER TABLE t DROP PRIMARY KEY, ALGORITHM=COPY;`, { dialect: 'mysql', ...ver('mariadb-10.6') }).find((f) => f.rule === 'mysql-drop-primary-key');
+  assert.match(old.message, /writes are blocked/);
+  // CHANGE with a type change and INSTANT is flagged
+  has(`${SET}ALTER TABLE t CHANGE COLUMN a a bigint NULL, ALGORITHM=INSTANT;`, 'mysql-algorithm-unsupported', afterCreate('CREATE TABLE t (id int, a int NULL);'));
+});
+
+test('S5: INSTANT cannot be combined with a LOCK clause (ERROR 1221), and the no-algorithm advice says so', () => {
+  has(`${SET}ALTER TABLE t ADD COLUMN c int NULL, ALGORITHM=INSTANT, LOCK=NONE;`, 'mysql-algorithm-unsupported');
+  has(`${SET}ALTER TABLE t ADD COLUMN c int NULL, LOCK=SHARED, ALGORITHM=INSTANT;`, 'mysql-algorithm-unsupported');
+  lacks(`${SET}ALTER TABLE t ADD COLUMN c int NULL, ALGORITHM=INSTANT;`, 'mysql-algorithm-unsupported');
+  lacks(`${SET}ALTER TABLE t ADD COLUMN c int NULL, ALGORITHM=INSTANT, LOCK=DEFAULT;`, 'mysql-algorithm-unsupported');
+  lacks(`${SET}ALTER TABLE t ADD COLUMN c int NULL, ALGORITHM=INPLACE, LOCK=NONE;`, 'mysql-algorithm-unsupported');
+  const msg = findings('ALTER TABLE t ADD COLUMN c int NULL;', { dialect: 'mysql' }).find((f) => f.rule === 'mysql-no-algorithm').message;
+  assert.ok(!/INSTANT\|INPLACE, LOCK=NONE/.test(msg));
+  assert.match(msg, /ALGORITHM=INSTANT \(alone/);
+  assert.match(findings(`${SET}ALTER TABLE t ADD COLUMN c int NULL, ALGORITHM=INSTANT, LOCK=NONE;`, { dialect: 'mysql' }).find((f) => f.rule === 'mysql-algorithm-unsupported').message, /ERROR 1221/);
+});
+
+test('error codes in messages: 1800 where INSTANT does not exist, 1845 or 1846 otherwise', () => {
+  const old = findings(`${SET}ALTER TABLE t ADD COLUMN c int NULL, ALGORITHM=INSTANT;`, { dialect: 'mysql', ...ver('5.7') }).find((f) => f.rule === 'mysql-algorithm-unsupported');
+  assert.match(old.message, /ERROR 1800/);
+  const fk = findings(`${SET}ALTER TABLE t ADD INDEX i (c), ALGORITHM=INSTANT;`, { dialect: 'mysql' }).find((f) => f.rule === 'mysql-algorithm-unsupported');
+  assert.match(fk.message, /ERROR 1845 or 1846/);
+  assert.ok(!/with ERROR 1845 instead/.test(fk.message));
+});
+
+test('S6: MariaDB WAIT n / NOWAIT before the actions neither fire the timeout rule nor hide the action rules', () => {
+  const drop = ids(`ALTER TABLE c NOWAIT DROP COLUMN note;`, { dialect: 'mysql' });
+  assert.ok(drop.includes('drop-column'), drop);
+  assert.ok(!drop.includes('mysql-lock-wait-timeout'));
+  has('ALTER TABLE c WAIT 5 ADD COLUMN v INT NOT NULL, ALGORITHM=INPLACE;', 'not-null-without-default');
+  has('ALTER ONLINE TABLE c ADD COLUMN v INT NOT NULL;', 'not-null-without-default');
+  assert.ok(ids('ALTER TABLE c WAIT 5 DROP COLUMN note;', { dialect: 'postgres' }).includes('drop-column'));
+});
+
+test('S8: ENUM members and indexes come from earlier files of the folder and from --schema', (t) => {
+  const dir = scratch(t);
+  put(dir, 'm/0001_create.sql', "-- migration-lint: irreversible -- test\nCREATE TABLE `tickets` (`id` bigint NOT NULL, `user_id` bigint NOT NULL, `status` ENUM('a','b') NOT NULL, KEY `k_user` (`user_id`)) ENGINE=InnoDB;\n");
+  const second = put(dir, 'm/0002_alter.sql', `-- migration-lint: irreversible -- test\n${SET}ALTER TABLE \`tickets\` MODIFY COLUMN \`status\` ENUM('a','b','c') NOT NULL, ALGORITHM=INSTANT;\nSET SESSION foreign_key_checks = 0;\nALTER TABLE \`tickets\` ADD CONSTRAINT fk FOREIGN KEY (user_id) REFERENCES users (id), ALGORITHM=INPLACE;\n`);
+  const rules = (args) => JSON.parse(lintCli([...args, '--format', 'json']).out).findings.map((f) => f.rule);
+  // only the second file is linted: the first is replayed
+  assert.deepEqual(rules([second]), []);
+  // a file elsewhere with --schema
+  const elsewhere = put(dir, 'other/0001_alter.sql', second ? `-- migration-lint: irreversible -- test\n-- migration-lint: dialect mysql\n${SET}ALTER TABLE \`tickets\` MODIFY COLUMN \`status\` ENUM('a','b','c') NOT NULL, ALGORITHM=INSTANT;\nSET SESSION foreign_key_checks = 0;\nALTER TABLE \`tickets\` ADD CONSTRAINT fk FOREIGN KEY (user_id) REFERENCES users (id), ALGORITHM=INPLACE;\n` : '');
+  assert.deepEqual(rules([elsewhere]).sort(), ['mysql-enum-change', 'mysql-fk-implicit-index']);
+  assert.deepEqual(rules([elsewhere, '--schema', join(dir, 'm/0001_create.sql')]), []);
+});
+
+test('instant row versions: only from 8.0.29, and a statement with an index is not instant', () => {
+  const add = (n) => `ALTER TABLE t ADD COLUMN c${n} int NULL, ALGORITHM=INSTANT;`;
+  const many = (to) => Array.from({ length: to }, (_, i) => add(i + 1)).join('\n');
+  const hits = (sql, ctx) => findings(`${SET}${sql}`, { dialect: 'mysql', ...ctx }).filter((f) => f.rule === 'mysql-instant-row-versions').length;
+  assert.equal(hits(many(60), ver('8.0.28')), 0);
+  assert.equal(hits(many(60), ver('8.0.29')), 5);
+  const withIndex = Array.from({ length: 60 }, (_, i) => `ALTER TABLE t ADD COLUMN c${i} int NULL, ADD INDEX i${i} (c${i}), ALGORITHM=INPLACE;`).join('\n');
+  assert.equal(hits(withIndex), 0);
+  const noAlgo = Array.from({ length: 60 }, (_, i) => `ALTER TABLE t ADD COLUMN c${i} int NULL, ADD INDEX i${i} (c${i});`).join('\n');
+  assert.equal(hits(noAlgo), 0);
+});
+
+test('instant row versions of earlier files count in a --history style run (only the last file is linted)', (t) => {
+  const dir = scratch(t);
+  const body = (from, to) => Array.from({ length: to - from + 1 }, (_, i) => `ALTER TABLE \`t\` ADD COLUMN \`c${from + i}\` int NULL, ALGORITHM=INSTANT;`).join('\n');
+  put(dir, 'm/0001_create.sql', '-- migration-lint: irreversible -- test\nCREATE TABLE `t` (`id` int) ENGINE=InnoDB;\n');
+  put(dir, 'm/0002_many.sql', `-- migration-lint: irreversible -- test\n${SET}${body(1, 55)}\n`);
+  const last = put(dir, 'm/0003_more.sql', `-- migration-lint: irreversible -- test\n${SET}${body(56, 58)}\n`);
+  const found = JSON.parse(lintCli([last, '--format', 'json']).out).findings.filter((f) => f.rule === 'mysql-instant-row-versions');
+  assert.equal(found.length, 3);
+  assert.match(found[0].message, /56th instant/);
+});
+
+test('ENUM append that also changes nullability is not INSTANT; MariaDB 10.3 ADD AFTER is flagged without ALGORITHM', () => {
+  const t = afterCreate("CREATE TABLE t (id int, status ENUM('a','b') NOT NULL);");
+  has(`${SET}ALTER TABLE t MODIFY COLUMN status ENUM('a','b','c') NULL, ALGORITHM=INSTANT;`, 'mysql-algorithm-unsupported', t);
+  lacks(`${SET}ALTER TABLE t MODIFY COLUMN status ENUM('a','b','c') NOT NULL, ALGORITHM=INSTANT;`, 'mysql-algorithm-unsupported', afterCreate("CREATE TABLE t (id int, status ENUM('a','b') NOT NULL);"));
+  has(`${SET}ALTER TABLE t ADD COLUMN c int NULL AFTER id;`, 'mysql-column-position', ver('mariadb-10.3'));
+  lacks(`${SET}ALTER TABLE t ADD COLUMN c int NULL AFTER id;`, 'mysql-column-position', ver('mariadb-10.4'));
 });
 
 test('good MySQL fixtures are clean under --strict on every supported version of the series they target', () => {
