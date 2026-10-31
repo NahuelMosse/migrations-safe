@@ -9,6 +9,8 @@ export const USAGE = `usage: migration-lint.mjs <file|dir|->... [options]
   --dialect postgres|sqlite|mysql   default: from the file, the project (migration_lock.toml, drizzle config) or its syntax
   --runner <id>                     prisma|drizzle|flyway|liquibase|goose|dbmate|golang-migrate|atlas|alembic|django|knex|raw
                                     default: detected from the project's config files
+  --mysql-version <v>               server the MySQL/MariaDB rules assume: 8.0 (default), 8.0.28, 8.4, 5.7, mariadb-10.6;
+                                    default: the image in a compose file or CI workflow next to the migrations, else 8.0
   --history                         also run the git checks; with no paths, lint the migrations new in the branch
   --repo <dir>                      repository for --history (default: the cwd)
   --base <ref>                      base for --history (default: origin/main, origin/master, main, master)
@@ -32,6 +34,7 @@ const parseArgs = (argv) => {
     if (a === '-h' || a === '--help') opts.help = true;
     else if (a === '--dialect') opts.dialect = value(i++, a);
     else if (a === '--runner') opts.runner = value(i++, a);
+    else if (a === '--mysql-version') opts.mysqlVersion = value(i++, a);
     else if (a === '--repo') opts.repo = value(i++, a);
     else if (a === '--base') opts.base = value(i++, a);
     else if (a === '--schema') opts.schema.push(value(i++, a));

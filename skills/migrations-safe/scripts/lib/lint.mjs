@@ -8,6 +8,7 @@ import { decodeSql, parse } from './parse.mjs';
 import { ERROR, WARN, lintSql } from './rules.mjs';
 import { PROFILES, RUNNER_IDS, DIALECTS, detectRunner, profileOf, projectDialect, runnerFromMarkers, sniffDialect } from './runners.mjs';
 import { applySql, cloneSchema } from './schema.mjs';
+import { DEFAULT_MYSQL_VERSION, mysqlVersionOrThrow, parseMysqlVersion, projectMysqlVersion } from './mysql.mjs';
 
 export { UsageError };
 
@@ -133,16 +134,27 @@ export const lintTargets = (opts) => {
   const schemaOf = createSchemaSource(seed);
   const createdBefore = new Set();
   const dialectOfDir = new Map();
+  const requestedVersion = opts.mysqlVersion ? mysqlVersionOrThrow(opts.mysqlVersion) : null;
+  const versionOfDir = new Map();
+  const shared = { instantVersions: new Map(), enums: new Map(), indexed: new Map() };
   for (const input of inputs) {
     const markers = parse(input.sql).markers;
     const detected = input.file ? detectRunner(input.file, { markers, fileName: basename(input.file) }) : (runnerFromMarkers(markers) ?? { id: 'raw' });
     const profile = profileOf(opts.runner ?? detected.id);
     if (input.file && !dialectOfDir.has(dirname(input.file))) dialectOfDir.set(dirname(input.file), projectDialect(input.file)?.dialect);
+    if (input.file && !versionOfDir.has(dirname(input.file))) versionOfDir.set(dirname(input.file), projectMysqlVersion(dirname(input.file)));
+    const declared = input.file ? versionOfDir.get(dirname(input.file)) : null;
+    const mysqlVersion = requestedVersion ?? declared?.version ?? parseMysqlVersion(DEFAULT_MYSQL_VERSION);
     const r = lintSql(input.sql, {
       dialect: opts.dialect, projectDialect: input.file ? dialectOfDir.get(dirname(input.file)) : undefined, profile,
       schema: input.file ? schemaOf(input.file) : cloneSchema(seed), createdBefore,
       generated: !input.file, noTransaction: input.file ? flywayNoTransaction(input.file) : false,
+      mysqlVersion, ...shared,
     });
+    if (r.dialect === 'mysql') {
+      const note = `MySQL rules assume ${mysqlVersion.label} (${requestedVersion ? '--mysql-version' : declared ? declared.evidence : `default, pass --mysql-version to change it`})`;
+      if (!notes.includes(note)) notes.push(note);
+    }
     if (!input.file && r.statements === 0) throw new UsageError('stdin held no SQL statements, so nothing was checked');
     if (input.file && fresh.has(input.file)) r.createdTables.forEach((t) => createdBefore.add(t));
     findings.push(...r.findings.map((f) => ({ ...f, file: input.label })));

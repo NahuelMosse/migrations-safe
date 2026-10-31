@@ -73,6 +73,10 @@ Load it when a finding needs explaining. In short:
 - **Locks** (`set-not-null`, `constraint-*`, `*-index-*`, `volatile-default`, `rewriting-column`,
   `missing-lock-timeout`): `NOT VALID` then `VALIDATE`, `CONCURRENTLY` in its own no-transaction file,
   `SET lock_timeout` before the first `ALTER`.
+- **MySQL and MariaDB** (`mysql-*`): which `ALGORITHM` the operation and the server version allow, metadata-lock
+  waits (`SET SESSION lock_wait_timeout`), foreign keys, FULLTEXT, primary keys, ENUM, charset and rebuilds.
+  Pass `--mysql-version 8.0.28|8.4|mariadb-10.6` (default 8.0, or the image in the project's compose file); big
+  tables go through gh-ost or pt-online-schema-change. Tables and caveats: [references/mysql.md](references/mysql.md).
 - **Transactions and rollback** (`concurrently-in-transaction`, `transaction-conflict`, `not-atomic`,
   `missing-down`): know whether the runner wraps the file; a down that runs, or an `irreversible` plan.
 - **History** (`applied-migration-changed`, `out-of-order`, `duplicate-sequence`): restore the applied file
@@ -130,4 +134,5 @@ reason**. Do not loop on warnings by editing around them, and do not add an `all
   Table sizes are unknown: a lock error on a ten-row table can be allowed with that reason; on a
   hundred-million-row table it is an outage.
 - ORM migrations in Ruby, Python or TypeScript are not read; lint the SQL they produce.
-- No SQL Server or Oracle rules. MySQL coverage is `ALGORITHM`, type changes, renames and the generic rules.
+- No SQL Server or Oracle rules. MySQL and MariaDB are covered at the depth of the online DDL tables (see
+  step 3), for the server version given with `--mysql-version`; Percona and other forks follow MySQL.

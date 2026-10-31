@@ -29,7 +29,7 @@ test('SKILL.md: frontmatter, size, variables and links', () => {
   assert.match(text, /Node 22\.13\+/);
   assert.match(text, /0 errors, or each remaining finding is allowed in the file with its\s+reason/);
   for (const [, link] of text.matchAll(/\]\((references\/[^)]+)\)/g)) assert.ok(existsSync(join(SKILL, link)), link);
-  for (const ref of ['rules', 'runners', 'rehearsal']) assert.ok(text.includes(`references/${ref}.md`));
+  for (const ref of ['rules', 'runners', 'rehearsal', 'mysql']) assert.ok(text.includes(`references/${ref}.md`));
   assert.ok(!/db:migrate:status` \+/.test(text));
 });
 
@@ -84,7 +84,7 @@ const rulesOf = (dir, extra = []) => {
 };
 
 test('fixtures: good ones are clean even with --fail-on warning, bad ones fail with exactly the advertised rules', () => {
-  for (const dir of ['good/postgres', 'good/sqlite']) assert.deepEqual(rulesOf(dir, ['--strict']), { code: 0, found: [] }, dir);
+  for (const dir of ['good/postgres', 'good/sqlite', 'good/mysql']) assert.deepEqual(rulesOf(dir, ['--strict']), { code: 0, found: [] }, dir);
   assert.deepEqual(rulesOf('bad/postgres').found, [
     'error:change-column-type', 'error:concurrently-in-transaction', 'error:constraint-without-not-valid', 'error:drop-column',
     'error:drop-table', 'error:index-without-concurrently', 'error:not-null-without-default', 'error:rename-column',
@@ -98,7 +98,12 @@ test('fixtures: good ones are clean even with --fail-on warning, bad ones fail w
     'error:constraint-builds-index', 'error:drop-index-without-concurrently', 'error:drop-materialized-view', 'error:drop-schema-cascade',
     'error:primary-key-using-index', 'error:rewriting-column', 'error:truncate', 'warning:missing-down', 'warning:not-atomic',
   ]);
-  assert.deepEqual(rulesOf('bad/mysql').found, ['error:change-column-type', 'error:rename-table', 'warning:missing-down', 'warning:mysql-no-algorithm']);
+  assert.deepEqual(rulesOf('bad/mysql').found, [
+    'error:change-column-type', 'error:change-column-type', 'error:mysql-add-foreign-key', 'error:mysql-algorithm-unsupported',
+    'error:mysql-charset-conversion', 'error:mysql-drop-primary-key', 'error:mysql-enum-change', 'error:mysql-fulltext-spatial-index',
+    'error:rename-column', 'error:rename-table', 'warning:missing-down', 'warning:mysql-change-column-rename', 'warning:mysql-fk-implicit-index',
+    'warning:mysql-lock-wait-timeout', 'warning:mysql-lock-wait-timeout', 'warning:mysql-no-algorithm', 'warning:mysql-table-rebuild',
+  ]);
   assert.deepEqual(rulesOf('bad/sqlite-rebuild').found, ['error:prisma-data-loss-warning', 'warning:missing-down', 'warning:not-atomic']);
   for (const dir of ['bad/postgres', 'bad/sqlite', 'bad/postgres-locks', 'bad/mysql', 'bad/sqlite-rebuild']) assert.equal(rulesOf(dir).code, 1, dir);
 });

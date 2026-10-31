@@ -3,6 +3,10 @@
 import { DIALECTS, fileDialectDirective, profileOf, sniffDialect, wrapsFile } from './runners.mjs';
 import { flat, ident, name, parse, splitTopLevel, stripLiterals } from './parse.mjs';
 import { applySchema, cloneSchema, insertTargets, parseAlter } from './schema.mjs';
+import {
+  DEFAULT_MYSQL_VERSION, INSTANT_ROW_VERSION_LIMIT, INSTANT_ROW_VERSION_WARN, algorithmProblem, createFacts, enumChange,
+  enumOf, hasPosition, hasRenameColumn, indexedColumn, instantAnyPosition, instantDrop, instantIsDefault, isMaria, parseMysqlVersion, supportsInstant,
+} from './mysql.mjs';
 
 export const ERROR = 'error';
 export const WARN = 'warning';
@@ -30,6 +34,19 @@ export const RULES = [
   { id: 'volatile-default', level: ERROR, area: 'lock' },
   { id: 'rewriting-column', level: ERROR, area: 'lock' },
   { id: 'mysql-no-algorithm', level: WARN, area: 'lock' },
+  { id: 'mysql-algorithm-unsupported', level: ERROR, area: 'lock' },
+  { id: 'mysql-lock-wait-timeout', level: WARN, area: 'lock' },
+  { id: 'mysql-add-foreign-key', level: ERROR, area: 'lock' },
+  { id: 'mysql-fk-implicit-index', level: WARN, area: 'lock' },
+  { id: 'mysql-fulltext-spatial-index', level: ERROR, area: 'lock' },
+  { id: 'mysql-drop-primary-key', level: ERROR, area: 'lock' },
+  { id: 'mysql-add-primary-key', level: WARN, area: 'lock' },
+  { id: 'mysql-charset-conversion', level: ERROR, area: 'lock' },
+  { id: 'mysql-enum-change', level: ERROR, area: 'lock' },
+  { id: 'mysql-table-rebuild', level: WARN, area: 'lock' },
+  { id: 'mysql-column-position', level: WARN, area: 'lock' },
+  { id: 'mysql-instant-row-versions', level: WARN, area: 'lock' },
+  { id: 'mysql-change-column-rename', level: WARN, area: 'running code' },
   { id: 'missing-lock-timeout', level: WARN, area: 'lock' },
   { id: 'concurrently-in-transaction', level: ERROR, area: 'transaction' },
   { id: 'transaction-conflict', level: WARN, area: 'transaction' },
@@ -51,6 +68,8 @@ const NOT_COLUMN_DROP = /^drop (?:constraint|index|key|default|not null|primary|
 const NON_DDL = /^(?:begin|start transaction|commit|set\b|pragma\b|select\b)/i;
 const TX_START =/^(?:begin|start transaction)\b/i;
 const LOCK_TIMEOUT = /^(?:set\s+(?:session\s+|local\s+)?lock_timeout\b|select\s+set_config\s*\(\s*'lock_timeout')/i;
+const MYSQL_LOCK_WAIT = /^(?:set\s+(?:session\s+|@@session\.)?lock_wait_timeout\s*=|set\s+statement\b.*\block_wait_timeout\s*=)/i;
+const FK_CHECKS = /^set\s+(?:session\s+|@@session\.|@@)?foreign_key_checks\s*=\s*(0|1|on|off|true|false)\b/i;
 const TABLE_ALL = String.raw`(?:only )?(${ident})`;
 
 const unbounded = (bare, { nullChecks }) => {
@@ -105,6 +124,14 @@ export const lintSql = (sql, ctx = {}) => {
   const requested = ctx.dialect ?? fileDialectDirective(sql) ?? ctx.projectDialect;
   const dialect = DIALECTS.includes(requested) ? requested : sniffDialect(sql);
   const pg = dialect === 'postgres';
+  const my = dialect === 'mysql';
+  const mysqlVersion = ctx.mysqlVersion ?? parseMysqlVersion(DEFAULT_MYSQL_VERSION);
+  // State that outlives one file: instant row versions, ENUM definitions and indexed columns per table.
+  const instantVersions = ctx.instantVersions ?? new Map();
+  const enums = ctx.enums ?? new Map();
+  const indexed = ctx.indexed ?? new Map();
+  const indexedFor = (table) => { if (!indexed.has(table)) indexed.set(table, new Set()); return indexed.get(table); };
+  let fkChecksOff = false;
   const profile = ctx.profile ?? profileOf('raw');
   const parsed = parse(sql, { dialect });
   const { statements, hasDownSection, markers } = parsed;
@@ -150,8 +177,91 @@ export const lintSql = (sql, ctx = {}) => {
     }));
   }
 
+  const GOT = 'gh-ost or pt-online-schema-change';
+  const mysqlAlterRules = (k, table, actions) => {
+    const v = mysqlVersion;
+    const algo = actions.map((a) => a.match(/^algorithm\s*=?\s*(\w+)/i)?.[1]?.toLowerCase()).find(Boolean);
+    const addsPk = actions.some((a) => /^add (?:constraint \S+ )?primary key\b/i.test(a));
+    const idx = indexedFor(table);
+    for (const a of actions) { const c = /^add\b(?!.*\bforeign key\b)/i.test(a) ? indexedColumn(a) : null; if (c) idx.add(c); }
+    if (algo === 'instant' && !supportsInstant(v))
+      add(k, 'mysql-algorithm-unsupported', `ALGORITHM=INSTANT does not exist on ${v.label} (${isMaria(v) ? 'MariaDB 10.3' : 'MySQL 8.0.12'} and later): the statement fails with ERROR 1845 — use ALGORITHM=INPLACE, LOCK=NONE, or ${GOT} for a big table`);
+    let rebuilds = false;
+    let versionAdded = false;
+    for (const a of actions) {
+      const bare = stripLiterals(a);
+      if (algo && ['instant', 'inplace', 'nocopy'].includes(algo) && !(algo === 'instant' && !supportsInstant(v))) {
+        const why = algorithmProblem(a, algo, v, { addsPrimaryKey: addsPk, fkChecksOff });
+        if (why) add(k, 'mysql-algorithm-unsupported', `ALGORITHM=${algo.toUpperCase()} cannot do this on ${v.label}: ${why}. The statement fails with ERROR 1845 instead of running — pick the algorithm the operation supports, or use ${GOT} for a big table`);
+      }
+      if (/^drop primary key\b/i.test(a) && !addsPk)
+        add(k, 'mysql-drop-primary-key', `drops the PRIMARY KEY of ${table} without adding one: only ALGORITHM=COPY supports it, so the table is copied while writes are blocked (and the table has no clustered key meanwhile) — replace the key in one statement (DROP PRIMARY KEY, ADD PRIMARY KEY (...)), or use ${GOT}`);
+      if (/^add (?:constraint \S+ )?primary key\b/i.test(a) || (/^drop primary key\b/i.test(a) && addsPk)) {
+        rebuilds = true;
+        if (/^add\b/i.test(a)) add(k, 'mysql-add-primary-key', `adding a PRIMARY KEY to ${table} rebuilds the whole table in place (concurrent DML is allowed, but disk use doubles and the metadata lock waits behind long transactions; NULL columns need NOT NULL first, and duplicates fail at the end): run it off-peak with LOCK=NONE, or use ${GOT}`);
+      }
+      if (/^add (?:fulltext|spatial)\b/i.test(a))
+        add(k, 'mysql-fulltext-spatial-index', `${/fulltext/i.test(a) ? 'FULLTEXT' : 'SPATIAL'} index on ${table} blocks writes while it builds (LOCK=NONE is not allowed${/fulltext/i.test(a) ? '; the first FULLTEXT index also rebuilds the table unless FTS_DOC_ID exists' : ''}): build it on a shadow table with ${GOT}, or accept the window with a recorded reason`);
+      if (/^add (?:constraint \S+ )?foreign key\b/i.test(a)) {
+        if (!fkChecksOff)
+          add(k, 'mysql-add-foreign-key', `adding a FOREIGN KEY to ${table} with foreign_key_checks=1 copies the whole table (ALGORITHM=INPLACE needs foreign_key_checks=0, which skips validating existing rows): validate orphans first with a query, then SET SESSION foreign_key_checks=0 around an ALGORITHM=INPLACE, LOCK=NONE ALTER — gh-ost does not support foreign keys, pt-online-schema-change needs --alter-foreign-keys-method`);
+        const col = indexedColumn(a);
+        if (col && !idx.has(col))
+          add(k, 'mysql-fk-implicit-index', `the FOREIGN KEY on ${table}(${col}) has no index on that column, so MySQL creates one inside the same ALTER and the build lengthens the lock: add the index first (ALTER TABLE ... ADD INDEX, ALGORITHM=INPLACE, LOCK=NONE), then the key`);
+        if (col) idx.add(col);
+      }
+      if (/^convert to (?:character set|charset)\b/i.test(a))
+        add(k, 'mysql-charset-conversion', `CONVERT TO CHARACTER SET rewrites every text column of ${table} and blocks writes (utf8/utf8mb3 to utf8mb4 also grows keys: indexed VARCHAR(255) goes past 767 bytes on COMPACT/REDUNDANT rows and the join with foreign-key or joined columns that keep the old collation stops using indexes): convert with ${GOT}, column by column, and keep collations of joined columns equal`);
+      else if (/^(?:modify|change)\b/i.test(a) && /\b(?:character set|charset|collate)\s+\w/i.test(bare))
+        add(k, 'mysql-charset-conversion', `changes the character set or collation of a column of ${table}: the table is rebuilt with writes blocked, indexed columns can exceed the key length, and joins against columns with another collation lose their index — ${GOT}, with the same collation on both sides of every join`);
+      if (/^force$/i.test(a) || /^engine\s*=\s*innodb$/i.test(a) || /^(?:row_format|key_block_size)\b/i.test(a)) {
+        rebuilds = true;
+        add(k, 'mysql-table-rebuild', `${/^force/i.test(a) ? 'ALTER TABLE ... FORCE' : /^engine/i.test(a) ? 'ENGINE=InnoDB' : 'changing the row format or key block size'} rebuilds ${table}: ALGORITHM=INPLACE allows DML but copies every page, doubles disk use and queues behind long transactions at both ends — off-peak with LOCK=NONE, or ${GOT}`);
+      }
+      const isAddColumn = /^add (?:column )?(?!constraint\b|index\b|key\b|unique\b|primary\b|foreign\b|check\b|fulltext\b|spatial\b|partition\b)/i.test(a);
+      if (isAddColumn && hasPosition(a) && !instantAnyPosition(v) && !isMaria(v))
+        add(k, 'mysql-column-position', `ADD COLUMN ... FIRST/AFTER on ${v.label} is not instant (only as the last column before MySQL 8.0.29): the table is rebuilt — add the column last, or ${GOT}`);
+      if (/^(?:modify|change)\b/i.test(a) && hasPosition(a))
+        add(k, 'mysql-column-position', `moving a column of ${table} (FIRST/AFTER) rebuilds the table: column order is not part of any contract, so leave it where it is`);
+      const change = a.match(/^change (?:column )?(\S+)\s+(\S+)/i);
+      if (change && name(change[1]) !== name(change[2]) && hasRenameColumn(v))
+        add(k, 'mysql-change-column-rename', `CHANGE COLUMN restates the whole definition to rename ${name(change[1])}: any difference from the real definition becomes a type or nullability change (a table copy) — use RENAME COLUMN ${name(change[1])} TO ${name(change[2])}${isMaria(v) ? '' : ' (instant since 8.0.28)'}`);
+      const enumDef = /^(?:add|modify|change)\b/i.test(a) ? enumOf(a) : null;
+      if (enumDef) {
+        const oldName = name(a.match(/^(?:modify|change)\s+(?:column\s+)?(\S+)/i)?.[1] ?? enumDef.column);
+        const before = enums.get(`${table}.${oldName}`);
+        if (/^(?:modify|change)\b/i.test(a)) {
+          const kind = enumDef.kind.toUpperCase();
+          if (before) {
+            const change2 = enumChange(before, enumDef);
+            if (change2 === 'reorder' || change2 === 'resize')
+              add(k, 'mysql-enum-change', change2 === 'resize'
+                ? `appending to the ${kind} of ${table}.${enumDef.column} changes its storage size (${kind === 'ENUM' ? '255 to 256 members' : 'the member count crosses a multiple of 8'}): the table is copied while writes are blocked — ${GOT}`
+                : `this ${kind} change on ${table}.${enumDef.column} removes, reorders or inserts members before the end: every stored value is renumbered, so the table is copied while writes are blocked and rows can change meaning — only append at the end, or use ${GOT}`);
+          } else {
+            add(k, 'mysql-enum-change', `cannot tell whether this ${kind} change on ${table}.${enumDef.column} only appends members (appending at the end is instant, anything else copies the table with writes blocked): check the current definition with SHOW CREATE TABLE, or add \`--schema\` with the CREATE TABLE`, { level: WARN });
+          }
+        }
+        enums.set(`${table}.${enumDef.column}`, enumDef);
+      }
+      if (isAddColumn || /^drop column\b/i.test(a)) {
+        const wouldBeInstant = algo === 'instant' || (algo === undefined && instantIsDefault(v) && (isAddColumn || instantDrop(v)));
+        if (!isMaria(v) && wouldBeInstant && !versionAdded) {
+          versionAdded = true;
+          const n = (instantVersions.get(table) ?? 0) + 1;
+          instantVersions.set(table, n);
+          if (n >= INSTANT_ROW_VERSION_WARN)
+            add(k, 'mysql-instant-row-versions', `this is the ${n}${n % 10 === 1 && n !== 11 ? 'st' : n % 10 === 2 && n !== 12 ? 'nd' : n % 10 === 3 && n !== 13 ? 'rd' : 'th'} instant ADD/DROP COLUMN on ${table} in these migrations: InnoDB keeps ${INSTANT_ROW_VERSION_LIMIT} row versions per table, then ALGORITHM=INSTANT fails with ERROR 4092 (read INFORMATION_SCHEMA.INNODB_TABLES.TOTAL_ROW_VERSIONS; a rebuild with ALTER TABLE ... FORCE resets it) — schedule the rebuild before this one`);
+        } else if (algo === 'inplace' || algo === 'copy') rebuilds = true;
+      }
+      if (/^wait\s+\d+$|^nowait$/i.test(a) && lockTimeoutAt === -1) lockTimeoutAt = k;
+    }
+    if (rebuilds) instantVersions.set(table, 0);
+  };
+
   const alterRules = (k, table, actions, text) => {
     const existing = isExisting(table);
+    if (my && existing) mysqlAlterRules(k, table, actions);
     if (dialect === 'mysql' && !/\balgorithm\s*=/i.test(text))
       add(k, 'mysql-no-algorithm', `ALTER TABLE ${table} without ALGORITHM/LOCK may copy the table under lock: declare ALGORITHM=INSTANT|INPLACE, LOCK=NONE so it fails instead; for a COPY on a big table use gh-ost`);
     for (const a of actions) {
@@ -164,7 +274,7 @@ export const lintSql = (sql, ctx = {}) => {
         add(k, 'rename-column', `renames a column of ${table} in one step: the code in production still uses the old name — expand (add new, write both, backfill), switch reads, contract later`);
       if (existing && (/^rename (?:to|as)\b/i.test(a) || /^set schema\b/i.test(a)) && !rebuilt(renamedTo.get(table)))
         add(k, 'rename-table', `${/^set schema/i.test(a) ? 'moves' : 'renames'} table ${table} in one step: create the new one (or a view with the old name) and move readers first`);
-      if (/^alter (?:column )?\S+ (?:set data )?type\b/i.test(a) || (dialect === 'mysql' && /^(?:modify|change) (?:column )?\w/i.test(a)))
+      if (/^alter (?:column )?\S+ (?:set data )?type\b/i.test(a) || (dialect === 'mysql' && /^(?:modify|change) (?:column )?\w/i.test(a) && !enumOf(a)))
         add(k, 'change-column-type', `changes a column type of ${table}: can rewrite the table under an exclusive lock and break readers — new column, backfill, switch, drop later (widening varchar(n) or varchar→text is the safe exception: allow it with a reason)`);
 
       const addMatch = a.match(/^add (?:column )?(?:if not exists )?(.*)$/is);
@@ -210,13 +320,47 @@ export const lintSql = (sql, ctx = {}) => {
   let reportedPragma = false;
   texts.forEach((t, k) => {
     const b = bare[k];
+    const fkSwitch = t.match(FK_CHECKS);
+    if (fkSwitch) fkChecksOff = /^(?:0|off|false)$/i.test(fkSwitch[1]);
     const create = t.match(new RegExp(String.raw`^create (?:temp(?:orary)? |unlogged )?table (?:if not exists )?(${ident})`, 'i'));
-    if (create) { created.add(name(create[1])); createdHere.add(name(create[1])); applySchema(tables, t); return; }
+    if (create) {
+      created.add(name(create[1])); createdHere.add(name(create[1])); applySchema(tables, t);
+      const facts = my ? createFacts(t) : null;
+      if (facts) {
+        for (const key of [...enums.keys()].filter((e) => e.startsWith(`${facts.table}.`))) enums.delete(key);
+        for (const [c, e] of facts.enums) enums.set(`${facts.table}.${c}`, e);
+        indexed.set(facts.table, facts.indexed);
+        instantVersions.delete(facts.table);
+      }
+      return;
+    }
 
     const alter = parseAlter(t);
     if (alter) {
       alterRules(k, alter.table, alter.actions, t);
       if (isExisting(alter.table) && firstLock === -1) firstLock = k;
+    }
+    if (my) {
+      const optimize = t.match(new RegExp(String.raw`^optimize (?:(?:no_write_to_binlog|local) )?table (.*)$`, 'i'));
+      for (const raw of optimize ? splitTopLevel(optimize[1]) : []) {
+        const table = name(raw);
+        if (!isExisting(table)) continue;
+        instantVersions.set(table, 0);
+        if (firstLock === -1) firstLock = k;
+        add(k, 'mysql-table-rebuild', `OPTIMIZE TABLE rebuilds ${table} (online for InnoDB, but it copies every page, doubles disk use, replays serially on replicas and waits for metadata locks at both ends); it takes no ALGORITHM or LOCK clause — run it off-peak under SET SESSION lock_wait_timeout, or rebuild with ${GOT}`);
+      }
+      const myIndex = t.match(new RegExp(String.raw`^create (?:(unique|fulltext|spatial) )?index (?:if not exists )?\S+ (?:using \w+ )?on (${ident})\s*\(\s*([^),\s(]+)`, 'i'));
+      if (myIndex) {
+        const table = name(myIndex[2]);
+        indexedFor(table).add(name(myIndex[3]));
+        if (isExisting(table) && firstLock === -1) firstLock = k;
+        if (isExisting(table) && /^(?:fulltext|spatial)$/i.test(myIndex[1] ?? ''))
+          add(k, 'mysql-fulltext-spatial-index', `${myIndex[1].toUpperCase()} index on ${table} blocks writes while it builds (LOCK=NONE is not allowed): build it on a shadow table with ${GOT}, or accept the window with a recorded reason`);
+      }
+      const dropIndex = t.match(new RegExp(String.raw`^drop index \S+ on (${ident})`, 'i'));
+      if (dropIndex && isExisting(name(dropIndex[1])) && firstLock === -1) firstLock = k;
+      const renameTables = t.match(/^rename table (.*)$/i);
+      if (renameTables && firstLock === -1 && isExisting(name(renameTables[1].split(/\s+to\s+/i)[0]))) firstLock = k;
     }
 
     const drop = t.match(new RegExp(String.raw`^drop table (?:if exists )?(.*)$`, 'i'));
@@ -263,9 +407,14 @@ export const lintSql = (sql, ctx = {}) => {
       reportedPragma = true;
       add(k, 'transaction-conflict', `PRAGMA foreign_keys is a no-op inside the transaction ${profile.label} wraps around the file, so DROP TABLE still runs ON DELETE CASCADE / SET NULL on child rows. Run the rebuild in the runner's no-transaction mode, where foreign_keys=OFF takes effect (PRAGMA defer_foreign_keys only helps plain NO ACTION foreign keys), and rehearse it with real child rows`, { level: copiedFrom.size ? ERROR : WARN });
     }
-    if (LOCK_TIMEOUT.test(t) && lockTimeoutAt === -1) lockTimeoutAt = k;
+    if ((my ? MYSQL_LOCK_WAIT : LOCK_TIMEOUT).test(t) && lockTimeoutAt === -1) lockTimeoutAt = k;
     applySchema(tables, t);
   });
+
+  if (my && firstLock !== -1 && (lockTimeoutAt === -1 || lockTimeoutAt > firstLock))
+    add(firstLock, 'mysql-lock-wait-timeout', lockTimeoutAt === -1
+      ? `DDL on an existing table without SET SESSION lock_wait_timeout: the statement waits for the table's metadata lock behind any open transaction (even an idle one) and every later query on the table queues behind it — SET SESSION lock_wait_timeout = 5 (MariaDB also accepts \`WAIT 5\` on the ALTER) and retry with backoff`
+      : 'lock_wait_timeout is set after the first DDL on an existing table, so that statement waits for its lock without a limit: move the SET before it', { line: statements[firstLock].line });
 
   if (pg && firstLock !== -1 && (lockTimeoutAt === -1 || lockTimeoutAt > firstLock))
     add(firstLock, 'missing-lock-timeout', lockTimeoutAt === -1
