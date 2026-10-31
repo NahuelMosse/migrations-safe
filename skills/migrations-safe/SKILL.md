@@ -18,6 +18,10 @@ environment applies the new files in the same order.
 
 ### 1. Lint every new migration before it is applied
 
+If the project lists `migrations-safe` in its `devDependencies`, run `npx --no-install migration-lint` and
+`npx --no-install rehearse` instead of `node "${CLAUDE_SKILL_DIR}/scripts/<name>.mjs"` in every command below: it is
+the version CI runs. Without it, the commands below run the copy in this skill.
+
 ```bash
 node "${CLAUDE_SKILL_DIR}/scripts/migration-lint.mjs" db/migrations/20261030_add_due_on.sql
 node "${CLAUDE_SKILL_DIR}/scripts/migration-lint.mjs" --history          # migrations new in this branch + git checks

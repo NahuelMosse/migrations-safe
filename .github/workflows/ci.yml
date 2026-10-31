@@ -34,7 +34,7 @@ jobs:
           node-version: ${{ matrix.node }}
       - run: npm test
       - name: Good fixtures lint clean
-        run: node skills/migrations-safe/scripts/migration-lint.mjs skills/migrations-safe/fixtures/good --strict
+        run: node skills/migrations-safe/scripts/migration-lint.mjs test/fixtures/good --strict
       - name: Bad fixtures are rejected
         shell: bash
         run: |
@@ -44,15 +44,15 @@ jobs:
             if [ "$code" -ne 1 ]; then echo "expected exit 1, got $code: $*"; exit 1; fi
           }
           for d in postgres postgres-locks mysql sqlite sqlite-rebuild mssql mssql-efcore mssql-dacpac oracle db2; do
-            expect_exit_1 node skills/migrations-safe/scripts/migration-lint.mjs "skills/migrations-safe/fixtures/bad/$d"
+            expect_exit_1 node skills/migrations-safe/scripts/migration-lint.mjs "test/fixtures/bad/$d"
           done
       - name: Rehearse the SQLite fixtures
         shell: bash
         run: |
           S=skills/migrations-safe
-          node $S/scripts/rehearse-sqlite.mjs $S/fixtures/seed-sqlite.sql $S/fixtures/good/sqlite/0007_tasks_due.sql
+          node $S/scripts/rehearse-sqlite.mjs test/fixtures/seed-sqlite.sql test/fixtures/good/sqlite/0007_tasks_due.sql
           code=0
-          node $S/scripts/rehearse-sqlite.mjs $S/fixtures/seed-sqlite.sql $S/fixtures/bad/sqlite-rebuild/0009_tasks_drop_priority.sql > /dev/null || code=$?
+          node $S/scripts/rehearse-sqlite.mjs test/fixtures/seed-sqlite.sql test/fixtures/bad/sqlite-rebuild/0009_tasks_drop_priority.sql > /dev/null || code=$?
           if [ "$code" -ne 1 ]; then echo "the lossy rebuild must exit 1, got $code"; exit 1; fi
 
   docker-rehearsal:
@@ -82,11 +82,11 @@ jobs:
           S=skills/migrations-safe
           printf 'ALTER TABLE orders ADD COLUMN due_on date;\n' > /tmp/pg-add.sql
           printf 'ALTER TABLE orders ADD COLUMN due_on date NULL, ALGORITHM=INSTANT;\n' > /tmp/my-add.sql
-          node $S/scripts/rehearse.mjs --engine postgres:16.4 $S/fixtures/seed-postgres.sql /tmp/pg-add.sql
-          node $S/scripts/rehearse.mjs --engine mysql:8.4.2 $S/fixtures/seed-mysql.sql /tmp/my-add.sql
-          node $S/scripts/rehearse.mjs --engine mariadb:11.4.3 $S/fixtures/seed-mysql.sql /tmp/my-add.sql
+          node $S/scripts/rehearse.mjs --engine postgres:16.4 test/fixtures/seed-postgres.sql /tmp/pg-add.sql
+          node $S/scripts/rehearse.mjs --engine mysql:8.4.2 test/fixtures/seed-mysql.sql /tmp/my-add.sql
+          node $S/scripts/rehearse.mjs --engine mariadb:11.4.3 test/fixtures/seed-mysql.sql /tmp/my-add.sql
           printf 'ALTER TABLE orders ADD COLUMN due_on date NULL;\n' > /tmp/my57-add.sql
-          node $S/scripts/rehearse.mjs --engine mysql:5.7.44 $S/fixtures/seed-mysql.sql /tmp/my57-add.sql
+          node $S/scripts/rehearse.mjs --engine mysql:5.7.44 test/fixtures/seed-mysql.sql /tmp/my57-add.sql
       - name: No rehearsal container is left behind
         if: always()
         run: |
@@ -116,7 +116,7 @@ jobs:
         run: |
           S=skills/migrations-safe
           printf 'ALTER TABLE orders ADD due_on date NULL;\n' > /tmp/ms-add.sql
-          node $S/scripts/rehearse.mjs --engine mssql:2022-CU14-ubuntu-22.04 --edition enterprise $S/fixtures/seed-mssql.sql /tmp/ms-add.sql
+          node $S/scripts/rehearse.mjs --engine mssql:2022-CU14-ubuntu-22.04 --edition enterprise test/fixtures/seed-mssql.sql /tmp/ms-add.sql
       - name: No rehearsal container or network is left behind
         if: always()
         run: |
@@ -170,6 +170,21 @@ jobs:
         run: |
           left=$(docker ps -aq --filter label=msafe-rehearse=1)$(docker network ls -q --filter label=msafe-rehearse=1)
           if [ -n "$left" ]; then echo "left behind:"; docker ps -a --filter label=msafe-rehearse=1; docker network ls --filter label=msafe-rehearse=1; exit 1; fi
+
+  # The one thing no unit test shows: `uses: ./` resolves, setup-node and the composite run line work on a runner, and the
+  # default inputs are accepted. A full run against the fixtures keeps it deterministic (the default --history run
+  # would flag this pull request's own fixture move as renames, correctly).
+  action:
+    if: github.event_name != 'schedule'
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+      - uses: ./
+        with:
+          args: test/fixtures/good --strict
 
   validate:
     if: github.event_name != 'schedule'

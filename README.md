@@ -1,7 +1,7 @@
 # migrations-safe
 
-A Claude Code skill, and a standalone CLI, for writing and reviewing database migrations that do not lose
-data, break the code already running, or lock a busy table.
+An npm package with a CLI and a GitHub Action, and a Claude Code skill that runs the same CLI, for writing and
+reviewing database migrations that do not lose data, break the code already running, or lock a busy table.
 
 - `migration-lint`: static checks over SQL migrations (PostgreSQL, SQLite, MySQL, SQL Server, Oracle, Db2 LUW), plus git history checks
   for applied migrations that were edited, renamed, deleted, out of order or duplicated.
@@ -9,34 +9,24 @@ data, break the code already running, or lock a busy table.
   MariaDB Docker container seeded from a `.sql` file or a dump, and reports rows and columns per table, lost
   values, duration and the write-blocking locks each migration held (`rehearse-sqlite` is the same command
   under its older name).
-- The skill tells the agent when to run them and how to fix each finding (expand, migrate, contract).
 
 Zero runtime dependencies. Node 22.13 or newer.
 
-## Install as a Claude Code plugin
+## Install
 
 ```bash
-claude plugin marketplace add NahuelMosse/migrations-safe
-claude plugin install migrations-safe@migrations-safe
+npm i -D migrations-safe
 ```
 
-Pin a release by adding the tag to the marketplace source, and update when you choose to:
+## Usage
 
 ```bash
-claude plugin marketplace add NahuelMosse/migrations-safe#v1.1.0
-claude plugin marketplace update migrations-safe
-claude plugin update migrations-safe@migrations-safe
-```
-
-## Standalone CLI
-
-```bash
-node skills/migrations-safe/scripts/migration-lint.mjs db/migrations/            # lint files or folders
-node skills/migrations-safe/scripts/migration-lint.mjs --history                 # new migrations in this branch + git checks
-python manage.py sqlmigrate shop 0042 | node skills/migrations-safe/scripts/migration-lint.mjs - --runner django
-node skills/migrations-safe/scripts/rehearse.mjs app.db db/migrations/0007_due.sql
-node skills/migrations-safe/scripts/rehearse.mjs --engine postgres:16 seed.sql db/migrations/0007_due.sql --down
-node skills/migrations-safe/scripts/rehearse.mjs --engine mysql:8.4 --dump prod-subset.sql.gz 0007.sql --lock-budget 1s
+npx migration-lint db/migrations/            # lint files or folders
+npx migration-lint --history                 # new migrations in this branch + git checks
+python manage.py sqlmigrate shop 0042 | npx migration-lint - --runner django
+npx rehearse app.db db/migrations/0007_due.sql
+npx rehearse --engine postgres:16 seed.sql db/migrations/0007_due.sql --down
+npx rehearse --engine mysql:8.4 --dump prod-subset.sql.gz 0007.sql --lock-budget 1s
 ```
 
 Lint options: `--runner`, `--dialect`, `--server-version` (`--mysql-version`), `--edition`, `--fail-on warning|error|<rule>,...`,
@@ -94,17 +84,34 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
-      - run: |
-          git clone --depth 1 --branch v1.1.0 https://github.com/NahuelMosse/migrations-safe.git "$RUNNER_TEMP/ms"
-          node "$RUNNER_TEMP/ms/skills/migrations-safe/scripts/migration-lint.mjs" --history --base origin/${{ github.base_ref }} --format github
+      - run: npm ci
+      - run: npx --no-install migration-lint --history --base origin/${{ github.base_ref }} --format github
 ```
 
 With `fetch-depth: 1` the history checks exit 2 and say so. For a push to main, compare with the commit before
 the push (`fetch-depth: 0` keeps it available):
 
 ```yaml
-      - run: node "$RUNNER_TEMP/ms/skills/migrations-safe/scripts/migration-lint.mjs" --history --base ${{ github.event.before }} --format github
+      - run: npx --no-install migration-lint --history --base ${{ github.event.before }} --format github
 ```
+
+### GitHub Action, for projects without Node tooling
+
+```yaml
+name: migrations
+on: pull_request
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # --history needs the full history
+      - uses: NahuelMosse/migrations-safe@v1.2.1
+```
+
+Inputs: `args` (arguments for `migration-lint`; default `--history --base origin/${{ github.base_ref }} --format github`)
+and `node-version` (default `24`). `args` is split on spaces, so a path with a space cannot be passed.
 
 A rehearsal job on a Linux runner (Docker is installed) with the engine pinned to production's version:
 
@@ -116,16 +123,35 @@ A rehearsal job on a Linux runner (Docker is installed) with the engine pinned t
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
-      - run: |
-          git clone --depth 1 --branch v1.1.0 https://github.com/NahuelMosse/migrations-safe.git "$RUNNER_TEMP/ms"
-          node "$RUNNER_TEMP/ms/skills/migrations-safe/scripts/rehearse.mjs" --engine postgres:16 db/seed.sql db/migrations/*.up.sql --down
+      - run: npm ci
+      - run: npx --no-install rehearse --engine postgres:16 db/seed.sql db/migrations/*.up.sql --down
 ```
+
+## Claude Code skill
+
+The skill tells the agent when to run these commands and how to fix each finding (expand, migrate, contract). It runs
+the same CLI from the skill directory, and prefers the project's `devDependencies` copy when there is one.
+
+```bash
+claude plugin marketplace add NahuelMosse/migrations-safe
+claude plugin install migrations-safe@migrations-safe
+```
+
+Pin a release by adding the tag to the marketplace source, and update when you choose to:
+
+```bash
+claude plugin marketplace add NahuelMosse/migrations-safe#v1.2.1
+claude plugin marketplace update migrations-safe
+claude plugin update migrations-safe@migrations-safe
+```
+
+To vendor only the skill directory: `npx skills add NahuelMosse/migrations-safe`.
 
 ## Development
 
 ```bash
 npm test
-node skills/migrations-safe/scripts/migration-lint.mjs skills/migrations-safe/fixtures/good --strict
+node skills/migrations-safe/scripts/migration-lint.mjs test/fixtures/good --strict
 ```
 
 The Docker rehearsal tests start containers (`postgres:16`, `mysql:8.4` by default; `MSAFE_DOCKER_ENGINES=postgres:17,mariadb:11`
@@ -135,5 +161,5 @@ that into a failure and `MSAFE_DOCKER_TESTS=0` skips them on purpose.
 Trigger evals live in `evals/` (run them with `claude plugin eval . --scaffold --allow-tools Bash`: four cases
 seed their workspace with a `fixture.sh`, and every case lists `Skill` in `allowed_tools` so the skill can fire).
 
-Layout: `skills/migrations-safe/` (SKILL.md, `scripts/`, `scripts/lib/`, `references/`, `fixtures/`), `evals/`,
-`test/`. License MIT.
+Layout: `skills/migrations-safe/` (SKILL.md, `scripts/`, `scripts/lib/`, `references/`), `action.yml`, `evals/`,
+`test/` (with `fixtures/`). License MIT.

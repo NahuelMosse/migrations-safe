@@ -325,7 +325,7 @@ test('ENUM append that also changes nullability is not INSTANT; MariaDB 10.3 ADD
 });
 
 test('good MySQL fixtures are clean under --strict on every supported version of the series they target', () => {
-  const dir = join(import.meta.dirname, '..', 'skills', 'migrations-safe', 'fixtures', 'good', 'mysql');
+  const dir = join(import.meta.dirname, 'fixtures', 'good', 'mysql');
   for (const v of ['8.0', '8.0.29', '8.4']) {
     const r = lintCli([dir, '--strict', '--mysql-version', v, '--format', 'json']);
     assert.deepEqual(JSON.parse(r.out).findings, [], v);
