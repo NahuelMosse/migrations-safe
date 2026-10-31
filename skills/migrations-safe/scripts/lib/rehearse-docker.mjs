@@ -177,7 +177,8 @@ const run = async (args, input, what) => {
 const snapshotOf = async (eng, c) => {
   const meta = await run(eng.queryArgs(c), eng.metaSql, 'reading the schema');
   const tables = new Map();
-  for (const [schema, table, name, type] of rows(meta).map((l) => l.split('\t').map((f) => f.trimEnd()))) {
+  // a client can print more than the rows (notices, warnings): only a line with all four fields is a column
+  for (const [schema, table, name, type] of rows(meta).map((l) => l.split('\t').map((f) => f.trimEnd())).filter((f) => f.length === 4)) {
     const key = eng.tableKey(schema, table);
     if (!tables.has(key)) tables.set(key, { schema, name: table, cols: [] });
     tables.get(key).cols.push({ name, type });
