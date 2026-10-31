@@ -12,7 +12,7 @@ test('Oracle commits every DDL: no runner wraps a file there, so not-atomic and 
   assert.equal(wrapsFor(profileOf('django'), 'postgres'), true);
   assert.equal(wrapsFile(profileOf('flyway'), { statements: 3, dialect: 'oracle' }), false);
   const two = 'ALTER TABLE t ADD c NUMBER;\nALTER TABLE t ADD d NUMBER;\n';
-  assert.ok(ids(two, { dialect: 'oracle', runner: 'flyway' }).includes('not-atomic'));
+  assert.ok(!ids(two, { dialect: 'oracle', runner: 'flyway' }).includes('not-atomic'), 'no transaction exists to advise, so no not-atomic');
   assert.ok(!ids(two.replaceAll('NUMBER', 'int'), { dialect: 'postgres', runner: 'flyway' }).includes('not-atomic'));
   assert.ok(!ids(`BEGIN;\n${two}COMMIT;\n`, { dialect: 'oracle', runner: 'flyway' }).includes('transaction-conflict'));
 });

@@ -454,7 +454,7 @@ export const lintSql = (sql, ctx = {}) => {
   const missing = profile.id === 'raw' ? [] : [...markers.separators].filter((s) => !profile.separators.includes(s));
   if (missing.length)
     add(0, 'unsupported-separator', `${missing.map((s) => (s === 'terminator' ? 'a custom statement terminator' : `\`${s}\``)).join(' and ')} in the file, but ${profile.label} does not split on it: the whole file reaches the driver as one statement and the server answers with a syntax error — use a runner that does (Flyway, Liquibase, DbUp), or send the file with sqlcmd/SQL*Plus/the Db2 CLP`);
-  if (dialect !== 'mysql' && ddl.length > 1 && !explicitTx && !concurrent && !wrapped)
+  if (dialect !== 'mysql' && dialect !== 'oracle' && ddl.length > 1 && !explicitTx && !concurrent && !wrapped)
     add(0, 'not-atomic', `${ddl.length} statements outside a transaction: a failure halfway leaves the schema between versions — BEGIN/COMMIT, or pass --runner (or add the runner's config file) when the runner wraps each file`);
 
   findings.sort((a, b) => a.line - b.line);

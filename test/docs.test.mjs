@@ -117,13 +117,13 @@ test('fixtures: good ones are clean even with --fail-on warning, bad ones fail w
   assert.deepEqual(rulesOf('bad/mssql-goose').found, ['warning:unsupported-separator']);
   assert.deepEqual(rulesOf('bad/oracle').found, [
     'error:drop-column', 'error:oracle-add-column-default', 'error:oracle-constraint-validate', 'error:oracle-index-not-online',
-    'error:oracle-online-unsupported-edition', 'error:oracle-online-unsupported-edition', 'warning:missing-down', 'warning:not-atomic',
+    'error:oracle-online-unsupported-edition', 'error:oracle-online-unsupported-edition', 'warning:missing-down',
     'warning:oracle-ddl-commits-dml', 'warning:oracle-ddl-lock-timeout', 'warning:oracle-drop-column-rewrites',
   ]);
   assert.deepEqual(rulesOf('bad/db2').found, [
     'error:change-column-type', 'error:change-column-type', 'error:db2-constraint-check', 'error:db2-reorg-limit', 'error:db2-reorg-pending',
     'error:drop-column', 'error:drop-column', 'warning:db2-lock-timeout', 'warning:db2-reorg-offline', 'warning:missing-down', 'warning:not-atomic',
   ]);
-  assert.deepEqual(rulesOf('bad/oracle-plsql').found, ['error:oracle-missing-slash', 'warning:missing-down', 'warning:not-atomic', 'warning:oracle-ddl-lock-timeout']);
+  assert.deepEqual(rulesOf('bad/oracle-plsql').found, ['error:oracle-missing-slash', 'warning:missing-down', 'warning:oracle-ddl-lock-timeout']);
   for (const dir of ['bad/postgres', 'bad/sqlite', 'bad/postgres-locks', 'bad/mysql', 'bad/sqlite-rebuild', 'bad/mssql', 'bad/mssql-efcore', 'bad/mssql-dacpac', 'bad/oracle', 'bad/oracle-plsql', 'bad/db2']) assert.equal(rulesOf(dir).code, 1, dir);
 });

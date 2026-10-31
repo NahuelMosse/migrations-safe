@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { parseServerVersion } from '../skills/migrations-safe/scripts/lib/server-version.mjs';
-import { findings } from './helpers.mjs';
+import { findings, ids } from './helpers.mjs';
 
 const run = (sql, { edition = 'se2', version = '19', ...ctx } = {}) => findings(sql, {
   dialect: 'oracle', runner: 'flyway', edition, serverVersion: parseServerVersion('oracle', version), ...ctx,
@@ -67,9 +67,11 @@ test('oracle-missing-slash: a block without / swallows what follows', () => {
   assert.deepEqual(run('CREATE OR REPLACE PROCEDURE p IS\nBEGIN\n  NULL;\nEND;\n/\n').map((f) => f.rule), []);
 });
 
-test('Oracle commits every DDL: BEGIN is a PL/SQL block, so several DDL statements are not atomic', () => {
+test('Oracle commits every DDL: not-atomic would advise a BEGIN/COMMIT that cannot work, so it is not reported', () => {
   const r = run('ALTER SESSION SET DDL_LOCK_TIMEOUT = 30;\nALTER TABLE t ADD (a NUMBER);\nALTER TABLE t ADD (b NUMBER);\n').map((f) => f.rule);
-  assert.deepEqual(r, ['not-atomic']);
+  assert.deepEqual(r, []);
+  assert.ok(ids('ALTER TABLE t ADD a int;\nALTER TABLE t ADD b int;\n', { dialect: 'mssql', runner: 'raw' }).includes('not-atomic'), 'SQL Server has transactional DDL');
+  assert.ok(ids('ALTER TABLE t ADD COLUMN a INTEGER;\nALTER TABLE t ADD COLUMN b INTEGER;\n', { dialect: 'db2', runner: 'raw' }).includes('not-atomic'), 'Db2 has transactional DDL');
 });
 
 test('names compare without case: "Orders" and ORDERS are the table created in this file', () => {

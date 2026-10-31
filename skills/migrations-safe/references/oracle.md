@@ -35,8 +35,9 @@ run says that what `oracle-online-unsupported-edition` reports passes there and 
 | Any DDL | commits the transaction: earlier DML in the file is committed | `oracle-ddl-commits-dml` |
 | PL/SQL block, procedure, function, package, trigger, type | ends at `/` on a line of its own | `oracle-missing-slash` |
 
-Oracle commits implicitly on every DDL, so no runner can wrap a file in a transaction: `not-atomic` applies to
-every file with more than one statement, and a failure halfway leaves the first statements applied.
+Oracle commits implicitly on every DDL, so no runner can wrap a file in a transaction and `BEGIN`/`COMMIT` cannot make
+several statements atomic: `not-atomic` is not reported for Oracle. A failure halfway leaves the first statements applied,
+so keep one DDL per migration or make each step safe to re-run.
 
 ## Reading Oracle scripts
 
