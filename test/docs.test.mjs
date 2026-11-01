@@ -51,6 +51,8 @@ test('packaging files agree with each other', () => {
   assert.ok(market.description && market.plugins[0].description);
   assert.match(read(join(ROOT, 'CHANGELOG.md')), new RegExp(`^## ${pkg.version.replaceAll('.', '\\.')}\\b`, 'm'));
   assert.match(read(join(ROOT, 'LICENSE')), /^MIT License[\s\S]*Copyright \(c\) 2026 Nahuel Mosse/);
+  // A copy of the skill directory alone (npx skills add) must still carry the license.
+  assert.equal(read(join(SKILL, 'LICENSE')), read(join(ROOT, 'LICENSE')));
   assert.ok(!existsSync(join(ROOT, 'evals.md')));
 });
 
