@@ -1,10 +1,14 @@
 # A Dependabot update to a patch or minor version (security fixes included) merges by itself once the checks required
 # on main pass. A major version waits for a person.
+# When the update reaches what npm installs, the patch version and the CHANGELOG are raised on the same branch, so the
+# merge publishes it (release.yml). A commit pushed with GITHUB_TOKEN starts no workflow, so ci.yml is dispatched on the
+# branch to run the required checks on that commit.
 name: dependabot auto-merge
 on: pull_request
 permissions:
   contents: write
   pull-requests: write
+  actions: write
 jobs:
   automerge:
     if: github.event.pull_request.user.login == 'dependabot[bot]' && github.repository == 'NahuelMosse/migrations-safe'
@@ -13,6 +17,25 @@ jobs:
     steps:
       - id: meta
         uses: dependabot/fetch-metadata@v3
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0
+      - id: version
+        run: node .github/scripts/dependabot-version.mjs "$BASE" "$TITLE"
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          TITLE: ${{ github.event.pull_request.title }}
+      - if: steps.version.outputs.bumped == 'true'
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit --all --message "chore(release): $(node -p "require('./package.json').version")"
+          git push origin "HEAD:$BRANCH"
+          gh workflow run ci.yml --ref "$BRANCH"
+        env:
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - if: steps.meta.outputs.update-type != 'version-update:semver-major'
         run: gh pr merge --auto --merge "$PR"
         env:
