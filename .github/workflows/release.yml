@@ -1,14 +1,22 @@
-# The first version is published manually (npm publish from a maintainer's machine), because npm trusted publishing
-# can only be configured on a package that already exists. Every later version is published from here by pushing a tag;
-# a tag whose version is already on npm (the hand-published first one) passes without publishing.
+# Publishes to npm whenever main (or a v* tag) carries a version that npm does not have yet, then tags that commit
+# v<version>. Releasing is merging a pull request that raises the version in package.json, plugin.json and CHANGELOG.md;
+# Dependabot updates that reach the package raise it by themselves (dependabot-automerge.yml).
+# The first version was published by hand, because npm trusted publishing can only be configured on an existing package.
 name: release
 on:
   push:
+    branches: [main]
     tags: ['v*']
   workflow_dispatch:
+  # A merge that GitHub's auto-merge makes on behalf of GITHUB_TOKEN starts no push workflow; the hourly run publishes it.
+  schedule:
+    - cron: '23 * * * *'
 permissions:
-  contents: read
+  contents: write
   id-token: write
+concurrency:
+  group: release
+  cancel-in-progress: false
 jobs:
   publish:
     runs-on: ubuntu-latest
@@ -24,10 +32,6 @@ jobs:
         with:
           node-version: '24'
           registry-url: 'https://registry.npmjs.org'
-      - name: Trusted publishing needs npm 11.5.1 or newer
-        run: |
-          npm install --global npm@11.21.1
-          npm --version
       - name: Tag, package.json and plugin.json versions agree
         run: |
           pkg=$(node -p "require('./package.json').version")
@@ -37,17 +41,37 @@ jobs:
           if [ "$GITHUB_REF_TYPE" = "tag" ]; then
             test "$GITHUB_REF_NAME" = "v$pkg" || { echo "::error::tag $GITHUB_REF_NAME is not v$pkg"; exit 1; }
           fi
-      - name: Install dependencies
-        run: |
-          if [ -f package-lock.json ]; then npm ci; else echo "no lockfile, zero dependencies: nothing to install"; fi
-      - run: npm test
-      - name: Publish
+      - id: plan
+        name: Is this version already on npm?
         run: |
           name=$(node -p "require('./package.json').name")
           pkg=$(node -p "require('./package.json').version")
+          echo "version=$pkg" >> "$GITHUB_OUTPUT"
           # A prerelease (1.3.0-rc.0) goes to the `next` dist-tag: `latest` only ever points at a stable version.
-          case "$pkg" in *-*) tag=next ;; *) tag=latest ;; esac
-          # Without a tag it only packs: `npm publish --dry-run` fails whenever this version is already on npm.
-          if [ "$GITHUB_REF_TYPE" != "tag" ]; then npm pack --dry-run
-          elif [ "$(npm view "$name@$pkg" version 2>/dev/null)" = "$pkg" ]; then echo "$name@$pkg is already on npm (the first version is published by hand): nothing to publish"
-          else npm publish --tag "$tag"; fi
+          case "$pkg" in *-*) echo "dist-tag=next" ;; *) echo "dist-tag=latest" ;; esac >> "$GITHUB_OUTPUT"
+          if [ "$GITHUB_REF_TYPE" != "tag" ] && [ "$GITHUB_REF_NAME" != "main" ]; then echo "mode=pack" >> "$GITHUB_OUTPUT"
+          elif [ "$(npm view "$name@$pkg" version)" = "$pkg" ]; then echo "$name@$pkg is already on npm: nothing to publish"; echo "mode=none" >> "$GITHUB_OUTPUT"
+          else echo "mode=publish" >> "$GITHUB_OUTPUT"; fi
+      - name: Trusted publishing needs npm 11.5.1 or newer
+        if: steps.plan.outputs.mode != 'none'
+        run: |
+          npm install --global npm@11.21.1
+          npm --version
+      - name: Install dependencies
+        if: steps.plan.outputs.mode != 'none'
+        run: |
+          if [ -f package-lock.json ]; then npm ci; else echo "no lockfile, zero dependencies: nothing to install"; fi
+      - if: steps.plan.outputs.mode != 'none'
+        run: npm test
+      - name: Pack (a branch other than main only shows what would be published)
+        if: steps.plan.outputs.mode == 'pack'
+        run: npm pack --dry-run
+      - if: steps.plan.outputs.mode == 'publish'
+        run: npm publish --tag "${{ steps.plan.outputs.dist-tag }}"
+      - name: Tag the published commit
+        if: steps.plan.outputs.mode == 'publish' && github.ref_type != 'tag'
+        run: |
+          tag="v${{ steps.plan.outputs.version }}"
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null; then echo "$tag already exists"; exit 0; fi
+          git tag "$tag" "$GITHUB_SHA"
+          git push origin "refs/tags/$tag"

@@ -3,8 +3,12 @@ updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
-      interval: weekly
+      interval: daily
   - package-ecosystem: npm
     directory: /
     schedule:
-      interval: weekly
+      interval: daily
+    # Patch and minor updates arrive in one pull request: two at once would both raise the same version and conflict.
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]
