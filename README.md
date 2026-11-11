@@ -128,7 +128,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0          # --history needs the full history
-      - uses: NahuelMosse/migrations-safe@v1.2.0
+      - uses: NahuelMosse/migrations-safe@v1.2.1
 ```
 
 The action runs `migrations-safe lint` from its own checkout, at the ref you pin. Inputs: `args` (arguments for
@@ -163,7 +163,7 @@ claude plugin install migrations-safe@migrations-safe
 Pin a release by adding the tag to the marketplace source, and update when you choose to:
 
 ```bash
-claude plugin marketplace add NahuelMosse/migrations-safe#v1.2.0
+claude plugin marketplace add NahuelMosse/migrations-safe#v1.2.1
 claude plugin marketplace update migrations-safe
 claude plugin update migrations-safe@migrations-safe
 ```
