@@ -29,7 +29,8 @@
     "provenance": true
   },
   "scripts": {
-    "test": "node --test \"test/*.test.mjs\"",
+    "test": "node --env-file=test/fast.env --test --test-force-exit \"test/*.test.mjs\"",
+    "test:docker": "node --test --test-force-exit test/rehearse-docker.test.mjs",
     "fixtures": "node skills/migrations-safe/scripts/migration-lint.mjs test/fixtures/good --strict"
   }
 }

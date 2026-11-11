@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.2.1
+
+- The skill directory carries its own `LICENSE` next to `NOTICES.md`, so a copy of it alone (`npx skills add`) is licensed.
+- A Dependabot update to a patch or minor version merges by itself once the required checks pass; when it reaches what
+  npm installs, the patch version and this changelog are raised on its branch and the merge publishes it. Major
+  updates wait for a person. Dependabot also watches the GitHub Actions and the npm dependencies.
+- `release.yml` publishes whatever version `main` carries that npm does not have, from `main` or a `v*` tag, with
+  provenance, and tags the published commit; an hourly run publishes merges that start no push workflow.
+- `SECURITY.md`: how to report a vulnerability.
+- `actions/checkout` 7.0.1 and `actions/setup-node` 7.1.0 in the workflows and in `action.yml`, pinned by SHA.
+- `npm test` is the fast run (the Docker rehearsal tests are skipped, `--test-force-exit`), the same on Windows,
+  macOS and Linux; `npm run test:docker` runs the rehearsal tests. CI runs the Docker jobs as before.
+- README: the quickstart comes first, and the support tables list every runner and every engine by id with what is
+  checked for each; `test/docs.test.mjs` fails when they drift from the runners and engines in the code.
+
 ## 1.2.0
 
 SQL Server, Oracle and Db2 LUW at the depth MySQL got in 1.1; published as the `migrations-safe` npm package, with a
