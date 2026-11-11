@@ -3,6 +3,8 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { RULES } from '../skills/migrations-safe/scripts/lib/rules.mjs';
+import { ENGINE_KINDS } from '../skills/migrations-safe/scripts/lib/rehearse-docker.mjs';
+import { DIALECTS, PROFILES, RUNNER_IDS } from '../skills/migrations-safe/scripts/lib/runners.mjs';
 import { FIXTURES, ROOT, SKILL, lintCli } from './helpers.mjs';
 
 const read = (p) => readFileSync(p, 'utf8');
@@ -10,6 +12,36 @@ const read = (p) => readFileSync(p, 'utf8');
 test('the rule table in references/rules.md is the rule registry', () => {
   const rows = [...read(join(SKILL, 'references/rules.md')).matchAll(/^\| `([a-z0-9-]+)` \| (error|warning) \|/gm)].map((m) => `${m[1]}:${m[2]}`);
   assert.deepEqual(rows.sort(), RULES.map((r) => `${r.id}:${r.level}`).sort());
+});
+
+// The rows of the README table whose second cell is an id in backticks: id -> the cells after it.
+const tableRows = (text, header) => {
+  const lines = text.slice(text.indexOf(header)).split('\n').slice(2);
+  const rows = new Map();
+  for (const line of lines) {
+    if (!line.startsWith('|')) break;
+    const cells = line.split(/(?<!\\)\|/).slice(1, -1).map((c) => c.trim());
+    rows.set(cells[1].replaceAll('`', ''), cells.slice(2));
+  }
+  return rows;
+};
+
+test('the README runner table lists every runner with the support level and downs of its profile', () => {
+  const rows = tableRows(read(join(ROOT, 'README.md')), '| Runner | Id |');
+  assert.deepEqual([...rows.keys()].sort(), [...RUNNER_IDS].sort());
+  for (const [id, [, support, downs]] of rows) {
+    assert.equal(support, PROFILES[id].generatesSql ? 'piped' : 'files', id);
+    assert.equal(downs, PROFILES[id].downs ? 'yes' : 'no', id);
+  }
+});
+
+test('the README engine table lists every dialect and rehearsal engine', () => {
+  const rows = tableRows(read(join(ROOT, 'README.md')), '| Engine | Id |');
+  assert.deepEqual([...rows.keys()].sort(), [...new Set([...DIALECTS, ...ENGINE_KINDS])].sort());
+  for (const [id, [, rehearsal]] of rows) {
+    if (ENGINE_KINDS.includes(id)) assert.ok(rehearsal.includes(`--engine ${id}:<tag>`), id);
+    else assert.ok(!rehearsal.includes('--engine'), id);
+  }
 });
 
 test('SKILL.md: frontmatter, size, variables and links', () => {

@@ -11,11 +11,17 @@ reviewing database migrations that do not lose data, break the code already runn
 
 Zero runtime dependencies. Node 22.13 or newer.
 
-## Install
+## Quickstart
 
 ```bash
 npm i -D migrations-safe
+npx migrations-safe lint db/migrations/
 ```
+
+You get one finding per line (rule, level, `file:line`, and the safer way to do it) and a summary. Exit 1 means
+findings at the failure level (errors by default), exit 2 means it could not run. The runner and the dialect are
+detected from the project; see the [support tables](#support). `npx migrations-safe lint --history` also checks the
+branch against its base for applied migrations that were edited, renamed, deleted or reordered.
 
 ## Usage
 
@@ -35,33 +41,44 @@ Lint options: `--runner`, `--dialect`, `--server-version` (`--mysql-version`), `
 `--engine`, `--edition`, `--dump`, `--down`, `--runner`, `--lock-budget`, `--keep`, `--disk`, `--allow-loss`. Exit codes: 0 nothing at the failure level, 1 findings,
 2 could not run (never a pass: 0 files linted, a shallow clone, bad arguments, a crash).
 
-## Support matrix
+## Support
 
-| Runner | Detected from | Downs | File wrapped in a transaction | Order |
-|---|---|---|---|---|
-| Prisma | `prisma/schema.prisma`, `migration_lock.toml` | no | implicit, multi-statement | strict |
-| Drizzle | `drizzle.config.*`, `meta/_journal.json` | no | yes | strict |
-| Flyway | `flyway.conf`, `V1__x.sql` | no | yes | strict |
-| Liquibase | `liquibase.properties`, master changelog | yes | yes | graph |
-| goose | `-- +goose` | yes | yes | strict |
-| dbmate | `-- migrate:up` | yes | yes | lenient |
-| golang-migrate | `x.up.sql` / `x.down.sql` | yes | implicit, multi-statement | strict |
-| Atlas | `atlas.hcl`, `atlas.sum` | no | yes | strict |
-| Alembic, Django, Knex | `alembic.ini`, `manage.py`, `knexfile.*` | yes | yes | graph / graph / strict |
-| Rails | `config/application.rb`, `db/migrate/*.rb` | yes | yes | lenient |
-| plain SQL | nothing | yes | no | strict |
+Runners and ORMs. Support is one of two levels: `files` (the migration files are linted as they are) or `piped` (the
+migrations are code, so the SQL they run is generated and piped in with `-`, for example
+`python manage.py sqlmigrate shop 0042 | npx migrations-safe lint - --runner django`).
+`references/runners.md` has the commands and the detection order.
 
-Alembic, Django, Knex and Rails generate SQL at run time: pipe it in with `-`.
+| Runner | Id | Detected from | Support | Downs | File wrapped in a transaction | Order |
+|---|---|---|---|---|---|---|
+| Prisma Migrate | `prisma` | `prisma/schema.prisma`, `migration_lock.toml` | files | no | implicit, multi-statement | strict |
+| Drizzle Kit | `drizzle` | `drizzle.config.*`, `meta/_journal.json` | files | no | yes | strict |
+| Flyway | `flyway` | `flyway.conf`, `V1__x.sql` | files | no | yes | strict |
+| Liquibase | `liquibase` | `liquibase.properties`, master changelog | files | yes | yes | graph |
+| goose | `goose` | `-- +goose` | files | yes | yes | strict |
+| dbmate | `dbmate` | `-- migrate:up` | files | yes | yes | lenient |
+| golang-migrate | `golang-migrate` | `x.up.sql` / `x.down.sql` | files | yes | implicit, multi-statement | strict |
+| Atlas | `atlas` | `atlas.hcl`, `atlas.sum` | files | no | yes | strict |
+| Alembic | `alembic` | `alembic.ini` | piped | yes | yes | graph |
+| Django | `django` | `manage.py` | piped | yes | yes | graph |
+| Knex | `knex` | `knexfile.*` | piped | yes | yes | strict |
+| Rails | `rails` | `config/application.rb`, `db/migrate/*.rb` | piped | yes | yes | lenient |
+| EF Core migrations | `efcore` | `*ModelSnapshot.cs`, `__EFMigrationsHistory` | piped | yes | no | strict |
+| DbUp | `dbup` | a `.csproj` with `dbup-*` | files | no | no | lenient |
+| SqlPackage (DACPAC) | `sqlpackage` | a `.sqlproj`, `tmp_ms_xx_` | piped | no | no | graph |
+| plain SQL files | `raw` | nothing | files | yes | no | strict |
 
-| Dialect | Lint | Rehearsal |
-|---|---|---|
-| PostgreSQL | all rules (locks, `CONCURRENTLY`, `NOT VALID`, defaults, transactions) | Docker `--engine postgres:<tag>`: duration, `pg_locks`, row and column diff, up-down-up |
-| MySQL 5.7, 8.0, 8.4 | `mysql-*` rules per server version (`--mysql-version`): `ALGORITHM` support, metadata-lock timeout, foreign keys, FULLTEXT/SPATIAL, primary keys, charset, ENUM, rebuilds, instant row versions; gh-ost / pt-online-schema-change advice | Docker `--engine mysql:<tag>`: duration, `performance_schema.metadata_locks`, diff, up-down-up |
-| MariaDB 10.3+ | same rules with MariaDB's instant-DDL versions (`--mysql-version mariadb-10.6`) | Docker `--engine mariadb:<tag>`: metadata locks through the `metadata_lock_info` plugin |
-| SQL Server 2016+ | `mssql-*` rules by version and edition (`--server-version`, `--edition standard\|enterprise\|azure`): online DDL, NOT NULL defaults, `LOCK_TIMEOUT`, constraints, `sp_rename`; `GO` batches, EF Core and DACPAC scripts | Docker `--engine mssql:<tag>`: Express, Standard Developer or Developer by edition, `sys.dm_tran_locks` |
-| Oracle 11g+ | `oracle-*` rules (`--edition se2\|ee`): defaults before 12.1, `DDL_LOCK_TIMEOUT`, implicit commits, `ONLINE`, `NOVALIDATE`, missing `/` | Docker `--engine oracle:<tag>` (Free; SE2 is not emulated), `v$lock` |
-| Db2 LUW 10.5+ | `db2-*` rules: REORG-pending after `DROP COLUMN`/`SET NOT NULL`/`SET DATA TYPE`, REORG limit, constraint checks, lock timeout | Docker `--engine db2:<tag>`, `MON_GET_LOCKS`, `REORG_PENDING` check (scheduled in CI) |
-| SQLite | generic rules, table rebuild checks | bundled `node:sqlite`, no Docker |
+Engines. Lint rules are per dialect (`--dialect`); a rehearsal runs the migrations on a database seeded from your
+schema. MariaDB lints as the `mysql` dialect.
+
+| Engine | Id | Lint | Rehearsal |
+|---|---|---|---|
+| PostgreSQL | `postgres` | all rules (locks, `CONCURRENTLY`, `NOT VALID`, defaults, transactions) | Docker `--engine postgres:<tag>`: duration, `pg_locks`, row and column diff, up-down-up |
+| MySQL 5.7, 8.0, 8.4 | `mysql` | `mysql-*` rules per server version (`--mysql-version`): `ALGORITHM` support, metadata-lock timeout, foreign keys, FULLTEXT/SPATIAL, primary keys, charset, ENUM, rebuilds, instant row versions; gh-ost / pt-online-schema-change advice | Docker `--engine mysql:<tag>`: duration, `performance_schema.metadata_locks`, diff, up-down-up |
+| MariaDB 10.3+ | `mariadb` | same rules with MariaDB's instant-DDL versions (`--mysql-version mariadb-10.6`) | Docker `--engine mariadb:<tag>`: metadata locks through the `metadata_lock_info` plugin |
+| SQL Server 2016+ | `mssql` | `mssql-*` rules by version and edition (`--server-version`, `--edition standard\|enterprise\|azure`): online DDL, NOT NULL defaults, `LOCK_TIMEOUT`, constraints, `sp_rename`; `GO` batches, EF Core and DACPAC scripts | Docker `--engine mssql:<tag>`: Express, Standard Developer or Developer by edition, `sys.dm_tran_locks` |
+| Oracle 11g+ | `oracle` | `oracle-*` rules (`--edition se2\|ee`): defaults before 12.1, `DDL_LOCK_TIMEOUT`, implicit commits, `ONLINE`, `NOVALIDATE`, missing `/` | Docker `--engine oracle:<tag>` (Free; SE2 is not emulated), `v$lock` |
+| Db2 LUW 10.5+ | `db2` | `db2-*` rules: REORG-pending after `DROP COLUMN`/`SET NOT NULL`/`SET DATA TYPE`, REORG limit, constraint checks, lock timeout | Docker `--engine db2:<tag>`, `MON_GET_LOCKS`, `REORG_PENDING` check (scheduled in CI) |
+| SQLite | `sqlite` | generic rules, table rebuild checks | bundled `node:sqlite`, no Docker |
 
 The linter is regex-based; for PostgreSQL also run `squawk`. Server-engine rehearsals need the `docker` CLI and
 reach the database only through `docker exec` (the container has no network, except Oracle and Db2: an `--internal` Docker network with no outside access, which nothing else joins); it is removed when the run ends,
@@ -154,11 +171,13 @@ claude plugin update migrations-safe@migrations-safe
 ## Development
 
 ```bash
-npm test
+npm test              # fast run: everything except the Docker rehearsal tests
+npm run test:docker   # the rehearsal tests, which start containers (needs Docker)
 node skills/migrations-safe/scripts/migration-lint.mjs test/fixtures/good --strict
 ```
 
-The Docker rehearsal tests start containers (`postgres:16`, `mysql:8.4` by default; `MSAFE_DOCKER_ENGINES=postgres:17,mariadb:11`
+`npm test` reads `MSAFE_DOCKER_TESTS=0` from `test/fast.env` (a variable already set in the environment wins), so it works the same on
+Windows, macOS and Linux. The Docker rehearsal tests start containers (`postgres:16`, `mysql:8.4` by default; `MSAFE_DOCKER_ENGINES=postgres:17,mariadb:11`
 changes them; `mssql:2022-CU14-ubuntu-22.04`, `oracle:23.5-slim-faststart` and `db2:11.5.9.0` run the other engines, which take minutes to start). Without Docker they are reported as `skipped: docker not available`; `MSAFE_REQUIRE_DOCKER=1` turns
 that into a failure and `MSAFE_DOCKER_TESTS=0` skips them on purpose.
 
