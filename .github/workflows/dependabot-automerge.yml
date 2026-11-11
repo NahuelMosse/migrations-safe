@@ -1,6 +1,6 @@
 # A Dependabot update merges by itself once the checks required on main pass: patch and minor versions (security fixes
-# included) and the major of a development dependency or of a GitHub Action. The major of a dependency that reaches what
-# npm installs waits for a person, because it changes what the users of the package get.
+# included) and the major of a development dependency. The major of a dependency that reaches what npm installs and
+# every GitHub Actions update wait for a person and get the needs-review label.
 # When the update reaches what npm installs, the patch version and the CHANGELOG are raised on the same branch, so the
 # merge publishes it (release.yml). A commit pushed with GITHUB_TOKEN starts no workflow, so ci.yml is dispatched on the
 # branch to run the required checks on that commit.
@@ -37,7 +37,12 @@ jobs:
         env:
           BRANCH: ${{ github.event.pull_request.head.ref }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - if: steps.meta.outputs.update-type != 'version-update:semver-major' || steps.meta.outputs.dependency-type == 'direct:development' || steps.meta.outputs.package-ecosystem == 'github_actions'
+      - if: steps.meta.outputs.package-ecosystem == 'github_actions' || (steps.meta.outputs.update-type == 'version-update:semver-major' && steps.meta.outputs.dependency-type != 'direct:development')
+        run: gh pr edit --add-label needs-review "$PR"
+        env:
+          PR: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - if: steps.meta.outputs.package-ecosystem != 'github_actions' && (steps.meta.outputs.update-type != 'version-update:semver-major' || steps.meta.outputs.dependency-type == 'direct:development')
         run: gh pr merge --auto --squash "$PR"
         env:
           PR: ${{ github.event.pull_request.html_url }}
