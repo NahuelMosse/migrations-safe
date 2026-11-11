@@ -4,11 +4,16 @@ updates:
     directory: /
     schedule:
       interval: daily
+    open-pull-requests-limit: 10
+    # Patch and minor updates arrive in one pull request: two at once would both raise the same version and conflict.
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]
   - package-ecosystem: npm
     directory: /
     schedule:
       interval: daily
-    # Patch and minor updates arrive in one pull request: two at once would both raise the same version and conflict.
+    open-pull-requests-limit: 10
     groups:
       minor-and-patch:
         update-types: [minor, patch]
