@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.2.1
+## 1.2.1 - 2026-11-11
 
 - The skill directory carries its own `LICENSE` next to `NOTICES.md`, so a copy of it alone (`npx skills add`) is licensed.
 - A Dependabot update to a patch or minor version merges by itself once the required checks pass; when it reaches what
