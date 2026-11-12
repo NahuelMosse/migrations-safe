@@ -3,6 +3,10 @@
 An npm package with a CLI and a GitHub Action, and a Claude Code skill that runs the same CLI, for writing and
 reviewing database migrations that do not lose data, break the code already running, or lock a busy table.
 
+![migrations-safe finding real issues: a dropped column and a NOT NULL column without default](docs/demo.gif)
+
+More demos and install options: https://lab.nawi.dev/tools/
+
 - `migrations-safe lint`: static checks over SQL migrations (PostgreSQL, SQLite, MySQL, SQL Server, Oracle, Db2 LUW), plus git history checks
   for applied migrations that were edited, renamed, deleted, out of order or duplicated.
 - `migrations-safe rehearse`: applies migrations to a copy of a SQLite database (the default), or to a throwaway
