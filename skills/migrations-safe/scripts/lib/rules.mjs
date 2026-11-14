@@ -12,6 +12,7 @@ import { COMMITS, DDL_LOCK_TIMEOUT, isDdl, isDml } from './oracle.mjs';
 import { oracleAlterRules, oracleStatementRules } from './oracle-rules.mjs';
 import { COMMIT, INPLACE, LOCK_TIMEOUT as DB2_LOCK_TIMEOUT, REORG_STATEMENT, REORG_UNIT_LIMIT } from './db2.mjs';
 import { db2AlterRules } from './db2-rules.mjs';
+import { uniqueOnNullable } from './unique-rules.mjs';
 
 export const ERROR = 'error';
 export const WARN = 'warning';
@@ -72,6 +73,7 @@ export const RULES = [
   { id: 'db2-reorg-limit', level: ERROR, area: 'lock' },
   { id: 'db2-constraint-check', level: ERROR, area: 'lock' },
   { id: 'db2-lock-timeout', level: WARN, area: 'lock' },
+  { id: 'unique-on-nullable', level: WARN, area: 'data integrity' },
   { id: 'missing-lock-timeout', level: WARN, area: 'lock' },
   { id: 'concurrently-in-transaction', level: ERROR, area: 'transaction' },
   { id: 'transaction-conflict', level: WARN, area: 'transaction' },
@@ -452,6 +454,9 @@ export const lintSql = (sql, ctx = {}) => {
     add(firstLock, 'missing-lock-timeout', lockTimeoutAt === -1
       ? "ALTER TABLE on an existing table without SET lock_timeout: a long query ahead of it makes every read and write queue behind its lock — SET lock_timeout = '5s' and retry on failure"
       : 'lock_timeout is set after the first ALTER TABLE on an existing table, so that ALTER waits for its lock without a limit: move the SET before it', { line: statements[firstLock].line });
+
+  // SQL Server lets one NULL into a unique key and Db2 treats NULL keys as equal in a unique index: neither repeats NULLs.
+  if (!ms && !db2) uniqueOnNullable({ texts, add });
 
   const ddl = texts.filter((t) => !NON_DDL.test(t));
   const concurrent = texts.some((t) => /\bconcurrently\b/i.test(t));

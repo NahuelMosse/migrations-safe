@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- New rule `unique-on-nullable` (warning): a UNIQUE constraint or unique index whose key holds a column the migration
+  declares without NOT NULL does not stop duplicates when that column is NULL. Quiet for primary key columns,
+  `NULLS NOT DISTINCT` and partial indexes `WHERE col IS NOT NULL`; columns the migration does not declare are not
+  judged; not applied to SQL Server or Db2, which do not let NULL keys repeat.
+
 ## 1.2.1 - 2026-11-11
 
 - The skill directory carries its own `LICENSE` next to `NOTICES.md`, so a copy of it alone (`npx skills add`) is licensed.

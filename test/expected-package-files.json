@@ -43,6 +43,7 @@
   "skills/migrations-safe/scripts/lib/runners.mjs",
   "skills/migrations-safe/scripts/lib/schema.mjs",
   "skills/migrations-safe/scripts/lib/server-version.mjs",
+  "skills/migrations-safe/scripts/lib/unique-rules.mjs",
   "skills/migrations-safe/scripts/migration-lint.mjs",
   "skills/migrations-safe/scripts/migrations-safe.mjs",
   "skills/migrations-safe/scripts/rehearse-sqlite.mjs",

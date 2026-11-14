@@ -3,8 +3,8 @@
 import { flat, ident, name, parse, splitTopLevel } from './parse.mjs';
 
 const ALTER_RE = new RegExp(String.raw`^alter (?:online )?(?:ignore )?table (?:if exists )?(?:only )?(${ident})(?: \*)?\s+(?:(wait\s+\d+|nowait)\s+)?(.*)$`, 'is');
-const CREATE_RE = new RegExp(String.raw`^create (?:temp(?:orary)? |unlogged )?table (?:if not exists )?(${ident})\s*\((.*)\)[^)]*$`, 'is');
-const CONSTRAINT_START = /^(constraint|primary|foreign|unique|check|key|index|fulltext|spatial|like|exclude)\b/i;
+export const CREATE_RE = new RegExp(String.raw`^create (?:temp(?:orary)? |unlogged )?table (?:if not exists )?(${ident})\s*\((.*)\)[^)]*$`, 'is');
+export const CONSTRAINT_START = /^(constraint|primary|foreign|unique|check|key|index|fulltext|spatial|like|exclude)\b/i;
 
 export const parseAlter = (text) => {
   const m = text.match(ALTER_RE);
