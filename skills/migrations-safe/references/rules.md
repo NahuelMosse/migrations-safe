@@ -89,3 +89,5 @@ Sources for `unique-on-nullable`: PostgreSQL "Constraints", Unique Constraints
 (https://dev.mysql.com/doc/refman/8.0/en/create-index.html); Microsoft Learn "Unique constraints and check
 constraints" (https://learn.microsoft.com/en-us/sql/relational-databases/tables/unique-constraints-and-check-constraints)
 and "Create filtered indexes" (https://learn.microsoft.com/en-us/sql/relational-databases/indexes/create-filtered-indexes).
+SQL Server and Db2 are skipped: both treat NULLs as equal in a unique index, so it allows one NULL (IBM Db2 "Unique
+indexes", https://www.ibm.com/docs/SSEPEK_12.0.0/intro/src/tpc/db2z_uniqueindexes.html).
