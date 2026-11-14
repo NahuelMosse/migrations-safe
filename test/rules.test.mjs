@@ -220,3 +220,33 @@ test('SQL a runner generated (stdin) shows its own transaction: BEGIN means wrap
 test('a DEFAULT E\'..\' string with an escaped quote does not hide the next ALTER action', () => {
   has(String.raw`ALTER TABLE orders ADD COLUMN a text DEFAULT E'it\'s,x', ADD COLUMN b int NOT NULL;`, 'not-null-without-default');
 });
+
+test('unique-on-nullable: a unique key over a column the migration declares nullable lets NULL rows repeat', () => {
+  const T = 'CREATE TABLE u (id int PRIMARY KEY, email text);';
+  has('CREATE TABLE u (id int PRIMARY KEY, email text UNIQUE);', 'unique-on-nullable');
+  has('CREATE TABLE u (a int NOT NULL, b int, UNIQUE (a, b));', 'unique-on-nullable');
+  has(`${T} CREATE UNIQUE INDEX u_email ON u (email);`, 'unique-on-nullable');
+  has(`${T} ALTER TABLE u ADD CONSTRAINT u_email UNIQUE (email);`, 'unique-on-nullable');
+  has('ALTER TABLE u ADD COLUMN code text UNIQUE;', 'unique-on-nullable');
+  has('CREATE TABLE u (id int PRIMARY KEY, email varchar(200), UNIQUE KEY uk_email (email(50)));', 'unique-on-nullable', { dialect: 'mysql' });
+  has('CREATE TABLE u (id NUMBER PRIMARY KEY, email VARCHAR2(200) UNIQUE);', 'unique-on-nullable', { dialect: 'oracle' });
+  const f = findings('CREATE TABLE u (a int NOT NULL, b int, UNIQUE (a, b));').find((x) => x.rule === 'unique-on-nullable');
+  assert.equal(f.level, 'warning');
+  assert.match(f.message, /does not stop duplicates when b is NULL/);
+  assert.match(f.message, /NOT NULL.*NULLS NOT DISTINCT \(PostgreSQL 15\+\).*sentinel/);
+});
+
+test('unique-on-nullable: quiet for NOT NULL, primary keys, NULLS NOT DISTINCT, IS NOT NULL partial indexes and undeclared columns', () => {
+  const T = 'CREATE TABLE u (id int PRIMARY KEY, email text);';
+  lacks('CREATE TABLE u (email text NOT NULL UNIQUE);', 'unique-on-nullable');
+  lacks('CREATE TABLE u (a int, b int, PRIMARY KEY (a, b), UNIQUE (a, b));', 'unique-on-nullable');
+  lacks('CREATE TABLE u (id int PRIMARY KEY UNIQUE);', 'unique-on-nullable');
+  lacks('CREATE TABLE u (email text UNIQUE NULLS NOT DISTINCT, b int, CONSTRAINT u_b UNIQUE NULLS NOT DISTINCT (b));', 'unique-on-nullable');
+  lacks(`${T} CREATE UNIQUE INDEX u_email ON u (email) NULLS NOT DISTINCT;`, 'unique-on-nullable');
+  lacks(`${T} CREATE UNIQUE INDEX u_email ON u (email) WHERE email IS NOT NULL;`, 'unique-on-nullable');
+  lacks(`${T} ALTER TABLE u ALTER COLUMN email SET NOT NULL; CREATE UNIQUE INDEX u_email ON u (email);`, 'unique-on-nullable');
+  lacks('ALTER TABLE users ADD CONSTRAINT users_email UNIQUE (email);', 'unique-on-nullable');
+  lacks(`${T} CREATE UNIQUE INDEX u_email ON u (lower(email));`, 'unique-on-nullable');
+  lacks('CREATE TABLE u (id int PRIMARY KEY, email nvarchar(100) UNIQUE);', 'unique-on-nullable', { dialect: 'mssql' });
+  lacks('CREATE TABLE u (id int NOT NULL PRIMARY KEY, email varchar(100), UNIQUE (email));', 'unique-on-nullable', { dialect: 'db2' });
+});
